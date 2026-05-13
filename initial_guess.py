@@ -6,7 +6,7 @@ import math
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 import matplotlib
 import numpy as np
@@ -22,41 +22,76 @@ OUTPUT_DIR = BASE_DIR / "output_initial"
 RK_FILE = BASE_DIR / "Ronge-Kutta.py"
 FD_FILE = BASE_DIR / "finite-difference.py"
 
+MODULE_CACHE: dict[str, object] = {}
+
+EPSILON_VALUES = (1e-3, 1e-4, 1e-5)
+TARGET_H_VALUES = (2e-2, 1e-2, 5e-3, 2.5e-3)
+FIXED_H_FOR_EPSILON_STUDY = 5e-3
+REFERENCE_RK_EPSILON = 1e-7
+REFERENCE_RK_H = 2e-4
+REFERENCE_FD_H = 5e-4
+IMPORTANT_NODE_FRACTIONS = (0.25, 0.5, 0.75)
+SPECIAL_N_MAX_XI1 = 50.0
+
 
 @dataclass(frozen=True)
-class InitializationStabilityResult:
+class ExactExperimentResult:
     method: str
     n: float
     epsilon: float
+    target_h: float
+    actual_h: float
+    error_inf: Optional[float]
     converged: bool
-    max_error_inf: Optional[float]
-    iterations: Optional[int]
-    residual_norm: Optional[float]
-    update_norm: Optional[float]
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class SpecialNodeExperimentResult:
+    method: str
+    n: float
+    epsilon: float
+    target_h: float
+    actual_h: float
+    theta_q25_error: Optional[float]
+    theta_q50_error: Optional[float]
+    theta_q75_error: Optional[float]
+    surface_derivative_error: Optional[float]
+    max_node_error: Optional[float]
+    converged: bool
     message: str = ""
 
 
 def _load_module(module_name: str, file_path: Path):
+    cached = MODULE_CACHE.get(module_name)
+    if cached is not None:
+        return cached
+
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot import {file_path}.")
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
+    MODULE_CACHE[module_name] = module
     return module
+
+
+def _rk_module():
+    return _load_module("ronge_kutta_solver", RK_FILE)
+
+
+def _fd_module():
+    return _load_module("finite_difference_solver", FD_FILE)
 
 
 def _format_float(value: Optional[float]) -> str:
     if value is None:
-        return ""
+        return "N/A"
     return f"{value:.12e}"
 
 
-def _interpolate_solution_theta(solution, xi_values: np.ndarray) -> np.ndarray:
-    return np.interp(xi_values, solution.xi, solution.theta)
-
-
-def _exact_theta(n: float, xi: np.ndarray) -> Optional[np.ndarray]:
+def _exact_theta(n: float, xi: np.ndarray) -> np.ndarray:
     if abs(n) < 1e-14:
         return 1.0 - xi**2 / 6.0
     if abs(n - 1.0) < 1e-14:
@@ -64,408 +99,546 @@ def _exact_theta(n: float, xi: np.ndarray) -> Optional[np.ndarray]:
         mask = xi != 0.0
         result[mask] = np.sin(xi[mask]) / xi[mask]
         return result
-    return None
+    if abs(n - 5.0) < 1e-14:
+        return 1.0 / np.sqrt(1.0 + xi**2 / 3.0)
+    raise ValueError("Exact solution is only implemented for n=0, 1, 5.")
 
 
-def _reference_points(n: float) -> tuple[np.ndarray, np.ndarray, str]:
+def _exact_theta_prime(n: float, xi: np.ndarray) -> np.ndarray:
+    if abs(n) < 1e-14:
+        return -xi / 3.0
+    if abs(n - 1.0) < 1e-14:
+        result = np.zeros_like(xi)
+        mask = xi != 0.0
+        result[mask] = (xi[mask] * np.cos(xi[mask]) - np.sin(xi[mask])) / xi[mask] ** 2
+        return result
+    if abs(n - 5.0) < 1e-14:
+        return -(xi / 3.0) * (1.0 + xi**2 / 3.0) ** (-1.5)
+    raise ValueError("Exact derivative is only implemented for n=0, 1, 5.")
+
+
+def _exact_xi_max(n: float) -> float:
+    if abs(n) < 1e-14:
+        return math.sqrt(6.0)
+    if abs(n - 1.0) < 1e-14:
+        return math.pi
+    if abs(n - 5.0) < 1e-14:
+        return 10.0
+    raise ValueError("Exact xi_max is only implemented for n=0, 1, 5.")
+
+
+def _exact_theta_right(n: float, xi_max: float) -> float:
+    return float(_exact_theta(n, np.array([xi_max], dtype=float))[0])
+
+
+def _actual_fd_h(xi_max: float, epsilon: float, target_h: float) -> tuple[int, float]:
+    num_intervals = max(20, math.ceil((xi_max - epsilon) / target_h))
+    actual_h = (xi_max - epsilon) / num_intervals
+    return num_intervals, actual_h
+
+
+def _solve_rk(
+    n: float,
+    epsilon: float,
+    h: float,
+    *,
+    xi_max: Optional[float] = None,
+    stop_at_zero: bool = True,
+):
+    return _rk_module().solve_lane_emden_rk4(
+        n=n,
+        epsilon=epsilon,
+        h=h,
+        xi_max=xi_max,
+        stop_at_zero=stop_at_zero,
+    )
+
+
+def _solve_fd(
+    n: float,
+    epsilon: float,
+    target_h: float,
+    *,
+    xi_max: float,
+    theta_right: float,
+):
+    num_intervals, actual_h = _actual_fd_h(xi_max, epsilon, target_h)
+    solution = _fd_module().solve_lane_emden_finite_difference(
+        n=n,
+        epsilon=epsilon,
+        num_intervals=num_intervals,
+        xi_max=xi_max,
+        theta_right=theta_right,
+        max_iterations=100,
+        residual_tolerance=1e-10,
+        update_tolerance=1e-10,
+    )
+    return solution, actual_h
+
+
+def _solution_theta(solution, xi_values: np.ndarray) -> np.ndarray:
+    return np.interp(xi_values, solution.xi, solution.theta)
+
+
+def _solution_theta_prime(solution, xi_values: np.ndarray) -> np.ndarray:
+    return np.interp(xi_values, solution.xi, solution.theta_prime)
+
+
+def _exact_case_result(method: str, n: float, epsilon: float, target_h: float) -> ExactExperimentResult:
+    xi_max = _exact_xi_max(n)
+    stop_at_zero = abs(n - 5.0) >= 1e-14
+
+    try:
+        if method == "RK4":
+            solution = _solve_rk(n, epsilon, target_h, xi_max=xi_max, stop_at_zero=stop_at_zero)
+            actual_h = target_h
+            converged = True
+        else:
+            solution, actual_h = _solve_fd(
+                n,
+                epsilon,
+                target_h,
+                xi_max=xi_max,
+                theta_right=_exact_theta_right(n, xi_max),
+            )
+            converged = bool(solution.converged)
+
+        xi_eval = np.linspace(epsilon, xi_max, 4000)
+        theta_num = _solution_theta(solution, xi_eval)
+        theta_ref = _exact_theta(n, xi_eval)
+        error_inf = float(np.max(np.abs(theta_num - theta_ref)))
+
+        return ExactExperimentResult(
+            method=method,
+            n=n,
+            epsilon=epsilon,
+            target_h=target_h,
+            actual_h=actual_h,
+            error_inf=error_inf,
+            converged=converged,
+        )
+    except Exception as exc:
+        return ExactExperimentResult(
+            method=method,
+            n=n,
+            epsilon=epsilon,
+            target_h=target_h,
+            actual_h=target_h,
+            error_inf=None,
+            converged=False,
+            message=str(exc),
+        )
+
+
+def _special_n_values() -> list[float]:
     reference_data = load_reference_data()
-    points = reference_data.get_sphere_table(n, until_first_zero=True)
-    xi = np.array([point.xi for point in points], dtype=float)
-    theta_table = np.array([point.theta for point in points], dtype=float)
-    theta_exact = _exact_theta(n, xi)
-    if theta_exact is not None:
-        return xi, theta_exact, "Exact"
-    return xi, theta_table, "ReferenceTable"
+    values: list[float] = []
+    for n in reference_data.available_global_n():
+        if n in (0.0, 1.0):
+            continue
+        prop = reference_data.get_global_property(n)
+        if prop is None or prop.xi_1 is None:
+            continue
+        if prop.xi_1 >= SPECIAL_N_MAX_XI1:
+            continue
+        values.append(n)
+    return values
 
 
-def _reference_curve(n: float) -> tuple[np.ndarray, np.ndarray, str]:
-    xi_sparse, theta_sparse, label = _reference_points(n)
-    if xi_sparse.size == 0:
-        return xi_sparse, theta_sparse, label
+def _build_special_reference(n: float) -> dict[str, object]:
+    reference_data = load_reference_data()
+    prop = reference_data.get_global_property(n)
+    if prop is None or prop.xi_1 is None or prop.theta_prime_surface is None:
+        raise ValueError(f"Missing global reference data for n={n:g}.")
 
-    if label == "Exact":
-        xi_dense = np.linspace(0.0, float(xi_sparse[-1]), 2000)
-        return xi_dense, _exact_theta(n, xi_dense), label
+    xi1 = prop.xi_1
+    xi_nodes = np.array([fraction * xi1 for fraction in IMPORTANT_NODE_FRACTIONS], dtype=float)
+    reference_solution, _ = _solve_fd(
+        n,
+        REFERENCE_RK_EPSILON,
+        REFERENCE_FD_H,
+        xi_max=xi1,
+        theta_right=0.0,
+    )
+    theta_nodes = _solution_theta(reference_solution, xi_nodes)
 
-    if xi_sparse.size == 1:
-        return xi_sparse, theta_sparse, label
-
-    xi_dense = np.linspace(float(xi_sparse[0]), float(xi_sparse[-1]), 2000)
-    theta_dense = np.interp(xi_dense, xi_sparse, theta_sparse)
-    return xi_dense, theta_dense, label
-
-
-def _compute_max_error(solution, n: float) -> Optional[float]:
-    xi_ref, theta_ref, _ = _reference_points(n)
-    if xi_ref.size == 0:
-        return None
-    mask = (xi_ref >= solution.xi[0]) & (xi_ref <= solution.xi[-1])
-    if not np.any(mask):
-        return None
-    theta_num = _interpolate_solution_theta(solution, xi_ref[mask])
-    return float(np.max(np.abs(theta_num - theta_ref[mask])))
+    return {
+        "xi1": xi1,
+        "surface_derivative": prop.theta_prime_surface,
+        "xi_nodes": xi_nodes,
+        "theta_nodes": theta_nodes,
+    }
 
 
-def test_rk_epsilon_stability(
+def _special_case_result(
+    method: str,
     n: float,
     epsilon: float,
-    *,
-    h: float = 2e-4,
-    max_steps: int = 1_000_000,
-):
+    target_h: float,
+    reference: dict[str, object],
+) -> SpecialNodeExperimentResult:
+    xi1 = float(reference["xi1"])
+    xi_nodes = np.array(reference["xi_nodes"], dtype=float)
+    theta_nodes_ref = np.array(reference["theta_nodes"], dtype=float)
+    surface_derivative_ref = float(reference["surface_derivative"])
+
     try:
-        rk_module = _load_module("ronge_kutta_solver", RK_FILE)
-        solution = rk_module.solve_lane_emden_rk4(
+        if method == "RK4":
+            solution = _solve_rk(n, epsilon, target_h, xi_max=xi1, stop_at_zero=False)
+            actual_h = target_h
+            converged = True
+        else:
+            solution, actual_h = _solve_fd(n, epsilon, target_h, xi_max=xi1, theta_right=0.0)
+            converged = bool(solution.converged)
+
+        theta_nodes_num = _solution_theta(solution, xi_nodes)
+        theta_node_errors = np.abs(theta_nodes_num - theta_nodes_ref)
+        surface_derivative_num = float(solution.theta_prime[-1])
+        surface_derivative_error = abs(surface_derivative_num - surface_derivative_ref)
+        max_node_error = float(
+            max(
+                theta_node_errors[0],
+                theta_node_errors[1],
+                theta_node_errors[2],
+                surface_derivative_error,
+            )
+        )
+
+        return SpecialNodeExperimentResult(
+            method=method,
             n=n,
             epsilon=epsilon,
-            h=h,
-            max_steps=max_steps,
+            target_h=target_h,
+            actual_h=actual_h,
+            theta_q25_error=float(theta_node_errors[0]),
+            theta_q50_error=float(theta_node_errors[1]),
+            theta_q75_error=float(theta_node_errors[2]),
+            surface_derivative_error=surface_derivative_error,
+            max_node_error=max_node_error,
+            converged=converged,
         )
-        max_error_inf = _compute_max_error(solution, n)
-        result = InitializationStabilityResult(
-            method="RK4",
-            n=n,
-            epsilon=epsilon,
-            converged=solution.first_zero is not None and (max_error_inf is None or math.isfinite(max_error_inf)),
-            max_error_inf=max_error_inf,
-            iterations=None,
-            residual_norm=None,
-            update_norm=None,
-        )
-        return result, solution
     except Exception as exc:
-        return (
-            InitializationStabilityResult(
-                method="RK4",
-                n=n,
-                epsilon=epsilon,
-                converged=False,
-                max_error_inf=None,
-                iterations=None,
-                residual_norm=None,
-                update_norm=None,
-                message=str(exc),
-            ),
-            None,
+        return SpecialNodeExperimentResult(
+            method=method,
+            n=n,
+            epsilon=epsilon,
+            target_h=target_h,
+            actual_h=target_h,
+            theta_q25_error=None,
+            theta_q50_error=None,
+            theta_q75_error=None,
+            surface_derivative_error=None,
+            max_node_error=None,
+            converged=False,
+            message=str(exc),
         )
 
 
-def test_fd_epsilon_stability(
+def _best_epsilon_exact(results: list[ExactExperimentResult], method: str, n: float) -> float:
+    candidates = [item for item in results if item.method == method and item.n == n and item.error_inf is not None]
+    if not candidates:
+        raise ValueError(f"No successful exact-case runs for method={method}, n={n:g}.")
+    return min(candidates, key=lambda item: item.error_inf).epsilon
+
+
+def _best_epsilon_special(results: list[SpecialNodeExperimentResult], method: str, n: float) -> float:
+    candidates = [item for item in results if item.method == method and item.n == n and item.max_node_error is not None]
+    if not candidates:
+        raise ValueError(f"No successful special-case runs for method={method}, n={n:g}.")
+    return min(candidates, key=lambda item: item.max_node_error).epsilon
+
+
+def _observed_order(xs: list[float], ys: list[float]) -> Optional[float]:
+    if len(xs) < 2 or any(value <= 0.0 for value in ys):
+        return None
+    coeffs = np.polyfit(np.log(xs), np.log(ys), 1)
+    return float(coeffs[0])
+
+
+def _plot_error_vs_epsilon(
+    results: list[ExactExperimentResult | SpecialNodeExperimentResult],
+    method: str,
     n: float,
-    epsilon: float,
+    output_path: Path,
     *,
-    num_intervals: int = 2000,
-    max_iterations: int = 80,
-    residual_tolerance: float = 1e-10,
-    update_tolerance: float = 1e-10,
-):
-    try:
-        fd_module = _load_module("finite_difference_solver", FD_FILE)
-        solution = fd_module.solve_lane_emden_finite_difference(
-            n=n,
-            epsilon=epsilon,
-            num_intervals=num_intervals,
-            max_iterations=max_iterations,
-            residual_tolerance=residual_tolerance,
-            update_tolerance=update_tolerance,
-        )
-        max_error_inf = _compute_max_error(solution, n)
-        result = InitializationStabilityResult(
-            method="FiniteDifference",
-            n=n,
-            epsilon=epsilon,
-            converged=bool(solution.converged),
-            max_error_inf=max_error_inf,
-            iterations=solution.iterations,
-            residual_norm=solution.residual_norm,
-            update_norm=solution.update_norm,
-        )
-        return result, solution
-    except Exception as exc:
-        return (
-            InitializationStabilityResult(
-                method="FiniteDifference",
-                n=n,
-                epsilon=epsilon,
-                converged=False,
-                max_error_inf=None,
-                iterations=None,
-                residual_norm=None,
-                update_norm=None,
-                message=str(exc),
-            ),
-            None,
-        )
+    value_field: str,
+    title_prefix: str,
+) -> None:
+    items = [item for item in results if item.method == method and item.n == n and getattr(item, value_field) is not None]
+    items.sort(key=lambda item: item.epsilon, reverse=True)
+    if not items:
+        return
+
+    epsilons = [item.epsilon for item in items]
+    errors = [getattr(item, value_field) for item in items]
+
+    plt.figure(figsize=(7, 5))
+    plt.loglog(epsilons, errors, marker="o", linewidth=1.5)
+    plt.xlabel(r"$\epsilon$")
+    plt.ylabel(r"error")
+    plt.title(f"{title_prefix}, {method}, n={n:g}")
+    plt.grid(True, which="both", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
 
 
-def results_to_rows(results: Iterable[InitializationStabilityResult]) -> list[dict[str, object]]:
-    return [
-        {
-            "method": result.method,
-            "n": result.n,
-            "epsilon": result.epsilon,
-            "converged": result.converged,
-            "max_error_inf": result.max_error_inf,
-            "iterations": result.iterations,
-            "residual_norm": result.residual_norm,
-            "update_norm": result.update_norm,
-            "message": result.message,
-        }
-        for result in results
-    ]
+def _plot_error_vs_h(
+    results: list[ExactExperimentResult | SpecialNodeExperimentResult],
+    method: str,
+    n: float,
+    output_path: Path,
+    *,
+    value_field: str,
+    title_prefix: str,
+) -> None:
+    items = [item for item in results if item.method == method and item.n == n and getattr(item, value_field) is not None]
+    items.sort(key=lambda item: item.actual_h, reverse=True)
+    if not items:
+        return
+
+    hs = [item.actual_h for item in items]
+    errors = [getattr(item, value_field) for item in items]
+
+    plt.figure(figsize=(7, 5))
+    plt.loglog(hs, errors, marker="o", linewidth=1.5)
+    plt.xlabel(r"$h$")
+    plt.ylabel(r"error")
+    plt.title(f"{title_prefix}, {method}, n={n:g}")
+    plt.grid(True, which="both", alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
 
 
-def _write_error_table(results: Iterable[InitializationStabilityResult], output_path: Path) -> None:
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=[
-                "method",
-                "n",
-                "epsilon",
-                "converged",
-                "max_error_inf",
-                "iterations",
-                "residual_norm",
-                "update_norm",
-                "message",
-            ],
-        )
-        writer.writeheader()
-        for row in results_to_rows(results):
-            writer.writerow(row)
-
-
-def _write_summary_table(results: Iterable[InitializationStabilityResult], output_path: Path) -> None:
-    grouped = sorted(results, key=lambda item: (item.n, item.method, item.epsilon))
-    with output_path.open("w", newline="", encoding="utf-8") as file:
+def _write_exact_tables(
+    epsilon_results: list[ExactExperimentResult],
+    h_results: list[ExactExperimentResult],
+) -> None:
+    with (OUTPUT_DIR / "exact_epsilon_study.csv").open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
-        writer.writerow(["n", "method", "epsilon", "converged", "max_error_inf"])
-        for item in grouped:
+        writer.writerow(["method", "n", "epsilon", "target_h", "actual_h", "error_inf", "converged", "message"])
+        for item in epsilon_results:
             writer.writerow(
                 [
-                    f"{item.n:g}",
                     item.method,
+                    f"{item.n:g}",
                     f"{item.epsilon:.0e}",
+                    f"{item.target_h:.12e}",
+                    f"{item.actual_h:.12e}",
+                    _format_float(item.error_inf),
                     item.converged,
-                    _format_float(item.max_error_inf),
+                    item.message,
+                ]
+            )
+
+    with (OUTPUT_DIR / "exact_h_study.csv").open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(["method", "n", "epsilon", "target_h", "actual_h", "error_inf", "converged", "message"])
+        for item in h_results:
+            writer.writerow(
+                [
+                    item.method,
+                    f"{item.n:g}",
+                    f"{item.epsilon:.0e}",
+                    f"{item.target_h:.12e}",
+                    f"{item.actual_h:.12e}",
+                    _format_float(item.error_inf),
+                    item.converged,
+                    item.message,
                 ]
             )
 
 
-def _compute_observed_orders(items: list[InitializationStabilityResult]) -> list[tuple[float, float, Optional[float]]]:
-    ordered = sorted(items, key=lambda item: item.epsilon, reverse=True)
-    output: list[tuple[float, float, Optional[float]]] = []
-    for left, right in zip(ordered, ordered[1:]):
-        if (
-            left.max_error_inf is None
-            or right.max_error_inf is None
-            or left.max_error_inf <= 0.0
-            or right.max_error_inf <= 0.0
-        ):
-            order = None
-        else:
-            order = math.log(left.max_error_inf / right.max_error_inf) / math.log(left.epsilon / right.epsilon)
-        output.append((left.epsilon, right.epsilon, order))
-    return output
+def _write_special_tables(
+    epsilon_results: list[SpecialNodeExperimentResult],
+    h_results: list[SpecialNodeExperimentResult],
+) -> None:
+    headers = [
+        "method",
+        "n",
+        "epsilon",
+        "target_h",
+        "actual_h",
+        "theta_q25_error",
+        "theta_q50_error",
+        "theta_q75_error",
+        "surface_derivative_error",
+        "max_node_error",
+        "converged",
+        "message",
+    ]
+
+    with (OUTPUT_DIR / "special_nodes_epsilon_study.csv").open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(headers)
+        for item in epsilon_results:
+            writer.writerow(
+                [
+                    item.method,
+                    f"{item.n:g}",
+                    f"{item.epsilon:.0e}",
+                    f"{item.target_h:.12e}",
+                    f"{item.actual_h:.12e}",
+                    _format_float(item.theta_q25_error),
+                    _format_float(item.theta_q50_error),
+                    _format_float(item.theta_q75_error),
+                    _format_float(item.surface_derivative_error),
+                    _format_float(item.max_node_error),
+                    item.converged,
+                    item.message,
+                ]
+            )
+
+    with (OUTPUT_DIR / "special_nodes_h_study.csv").open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(headers)
+        for item in h_results:
+            writer.writerow(
+                [
+                    item.method,
+                    f"{item.n:g}",
+                    f"{item.epsilon:.0e}",
+                    f"{item.target_h:.12e}",
+                    f"{item.actual_h:.12e}",
+                    _format_float(item.theta_q25_error),
+                    _format_float(item.theta_q50_error),
+                    _format_float(item.theta_q75_error),
+                    _format_float(item.surface_derivative_error),
+                    _format_float(item.max_node_error),
+                    item.converged,
+                    item.message,
+                ]
+            )
 
 
-def _write_convergence_report(results: list[InitializationStabilityResult], output_path: Path) -> None:
-    grouped: dict[tuple[float, str], list[InitializationStabilityResult]] = {}
-    for result in results:
-        grouped.setdefault((result.n, result.method), []).append(result)
-
+def _write_convergence_report(
+    exact_h_results: list[ExactExperimentResult],
+    special_h_results: list[SpecialNodeExperimentResult],
+) -> None:
     lines: list[str] = []
-    lines.append("Observed convergence order with respect to epsilon")
-    lines.append("Error metric: infinity norm of theta error on reference coordinates")
+    lines.append("Convergence report for initialization and step-size studies")
+    lines.append("")
+    lines.append("Exact cases: n = 0, 1, 5")
+    lines.append("Metric: ||theta_num - theta_exact||_inf")
     lines.append("")
 
-    for (n, method) in sorted(grouped):
-        lines.append(f"n = {n:g}, method = {method}")
-        for item in sorted(grouped[(n, method)], key=lambda value: value.epsilon, reverse=True):
-            lines.append(
-                f"  epsilon = {item.epsilon:.0e}, converged = {item.converged}, "
-                f"||error||_inf = {_format_float(item.max_error_inf) or 'N/A'}"
-            )
-        for eps_left, eps_right, order in _compute_observed_orders(grouped[(n, method)]):
-            order_text = "N/A" if order is None else f"{order:.6f}"
-            lines.append(f"  order from {eps_left:.0e} to {eps_right:.0e}: {order_text}")
-        lines.append("")
+    for method in ("RK4", "FiniteDifference"):
+        for n in (0.0, 1.0, 5.0):
+            items = [item for item in exact_h_results if item.method == method and item.n == n and item.error_inf is not None]
+            items.sort(key=lambda item: item.actual_h, reverse=True)
+            errors = [item.error_inf for item in items if item.error_inf is not None]
+            hs = [item.actual_h for item in items]
+            order = _observed_order(hs, errors)
+            lines.append(f"method={method}, n={n:g}, observed p={_format_float(order)}")
+            for item in items:
+                lines.append(
+                    f"  epsilon={item.epsilon:.0e}, h={item.actual_h:.12e}, "
+                    f"error_inf={_format_float(item.error_inf)}, converged={item.converged}"
+                )
+            lines.append("")
 
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    lines.append("Non-exact cases")
+    lines.append("Metric: max of errors at xi_1/4, xi_1/2, 3xi_1/4, and theta'(xi_1)")
+    lines.append("")
 
+    for method in ("RK4", "FiniteDifference"):
+        for n in _special_n_values():
+            items = [item for item in special_h_results if item.method == method and item.n == n and item.max_node_error is not None]
+            items.sort(key=lambda item: item.actual_h, reverse=True)
+            errors = [item.max_node_error for item in items if item.max_node_error is not None]
+            hs = [item.actual_h for item in items]
+            order = _observed_order(hs, errors)
+            lines.append(f"method={method}, n={n:g}, observed p={_format_float(order)}")
+            for item in items:
+                lines.append(
+                    f"  epsilon={item.epsilon:.0e}, h={item.actual_h:.12e}, "
+                    f"max_node_error={_format_float(item.max_node_error)}, converged={item.converged}"
+                )
+            lines.append("")
 
-def _plot_method_comparison(
-    n: float,
-    epsilon_to_solution: dict[float, object],
-    method_name: str,
-    output_path: Path,
-) -> None:
-    xi_ref, theta_ref, label = _reference_curve(n)
-    plt.figure(figsize=(8, 5))
-    plt.plot(xi_ref, theta_ref, color="black", linewidth=2.0, label=label)
-
-    for epsilon in sorted(epsilon_to_solution, reverse=True):
-        solution = epsilon_to_solution[epsilon]
-        xi_plot = np.linspace(float(solution.xi[0]), float(solution.xi[-1]), 2000)
-        theta_plot = _interpolate_solution_theta(solution, xi_plot)
-        plt.plot(xi_plot, theta_plot, linewidth=1.5, label=fr"$\epsilon={epsilon:.0e}$")
-
-    plt.xlabel(r"$\xi$")
-    plt.ylabel(r"$\theta(\xi)$")
-    plt.title(f"{method_name} solution comparison, n={n:g}")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    plt.close()
+    (OUTPUT_DIR / "initialization_convergence.txt").write_text("\n".join(lines), encoding="utf-8")
 
 
-def _plot_error_curves(
-    n: float,
-    epsilon_to_solution: dict[float, object],
-    method_name: str,
-    output_path: Path,
-) -> None:
-    xi_ref, theta_ref, label = _reference_curve(n)
-    plt.figure(figsize=(8, 5))
-
-    for epsilon in sorted(epsilon_to_solution, reverse=True):
-        solution = epsilon_to_solution[epsilon]
-        mask = (xi_ref >= solution.xi[0]) & (xi_ref <= solution.xi[-1])
-        xi_eval = xi_ref[mask]
-        theta_num = _interpolate_solution_theta(solution, xi_eval)
-        error = np.abs(theta_num - theta_ref[mask])
-        plt.plot(xi_eval, error, linewidth=1.5, label=fr"$\epsilon={epsilon:.0e}$")
-
-    plt.xlabel(r"$\xi$")
-    plt.ylabel(r"$\|error\|_\infty$ pointwise view")
-    plt.title(f"{method_name} absolute error, n={n:g} vs {label.lower()}")
-    plt.yscale("log")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=200)
-    plt.close()
-
-
-def _write_pointwise_reference_comparison(
-    n: float,
-    rk_solutions: dict[float, object],
-    fd_solutions: dict[float, object],
-    output_path: Path,
-) -> None:
-    xi_ref, theta_ref, label = _reference_points(n)
-    if label == "Exact" or xi_ref.size == 0:
-        return
-
-    epsilons = sorted(set(rk_solutions) | set(fd_solutions), reverse=True)
-    fieldnames = ["xi", "theta_reference"]
-    for epsilon in epsilons:
-        fieldnames.extend(
-            [
-                f"rk4_theta_eps_{epsilon:.0e}",
-                f"rk4_abs_error_eps_{epsilon:.0e}",
-                f"fd_theta_eps_{epsilon:.0e}",
-                f"fd_abs_error_eps_{epsilon:.0e}",
-            ]
-        )
-
-    with output_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=fieldnames)
-        writer.writeheader()
-        for index, xi in enumerate(xi_ref):
-            row: dict[str, object] = {
-                "xi": f"{xi:.12e}",
-                "theta_reference": f"{theta_ref[index]:.12e}",
-            }
-            for epsilon in epsilons:
-                if epsilon in rk_solutions:
-                    rk_theta = float(_interpolate_solution_theta(rk_solutions[epsilon], np.array([xi]))[0])
-                    row[f"rk4_theta_eps_{epsilon:.0e}"] = f"{rk_theta:.12e}"
-                    row[f"rk4_abs_error_eps_{epsilon:.0e}"] = f"{abs(rk_theta - theta_ref[index]):.12e}"
-                else:
-                    row[f"rk4_theta_eps_{epsilon:.0e}"] = ""
-                    row[f"rk4_abs_error_eps_{epsilon:.0e}"] = ""
-
-                if epsilon in fd_solutions:
-                    fd_theta = float(_interpolate_solution_theta(fd_solutions[epsilon], np.array([xi]))[0])
-                    row[f"fd_theta_eps_{epsilon:.0e}"] = f"{fd_theta:.12e}"
-                    row[f"fd_abs_error_eps_{epsilon:.0e}"] = f"{abs(fd_theta - theta_ref[index]):.12e}"
-                else:
-                    row[f"fd_theta_eps_{epsilon:.0e}"] = ""
-                    row[f"fd_abs_error_eps_{epsilon:.0e}"] = ""
-
-            writer.writerow(row)
-
-
-def run_initialization_study(
-    n_values: Optional[Iterable[float]] = None,
-    epsilons: Iterable[float] = (1e-3, 1e-4, 1e-5),
-    *,
-    rk_step: float = 2e-4,
-    fd_num_intervals: int = 2000,
-    fd_max_iterations: int = 80,
-) -> list[InitializationStabilityResult]:
-    if n_values is None:
-        n_values = load_reference_data().available_sphere_n()
-
+def run_initialization_study() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     for path in OUTPUT_DIR.glob("*"):
         if path.is_file():
             path.unlink()
 
-    results: list[InitializationStabilityResult] = []
+    exact_n_values = (0.0, 1.0, 5.0)
+    special_n_values = _special_n_values()
 
-    for n in n_values:
-        rk_solutions: dict[float, object] = {}
-        fd_solutions: dict[float, object] = {}
+    exact_epsilon_results: list[ExactExperimentResult] = []
+    exact_h_results: list[ExactExperimentResult] = []
+    special_epsilon_results: list[SpecialNodeExperimentResult] = []
+    special_h_results: list[SpecialNodeExperimentResult] = []
 
-        for epsilon in epsilons:
-            rk_result, rk_solution = test_rk_epsilon_stability(n, epsilon, h=rk_step)
-            fd_result, fd_solution = test_fd_epsilon_stability(
+    for method in ("RK4", "FiniteDifference"):
+        for n in exact_n_values:
+            for epsilon in EPSILON_VALUES:
+                exact_epsilon_results.append(_exact_case_result(method, n, epsilon, FIXED_H_FOR_EPSILON_STUDY))
+
+            try:
+                best_epsilon = _best_epsilon_exact(exact_epsilon_results, method, n)
+            except ValueError:
+                best_epsilon = None
+            if best_epsilon is not None:
+                for target_h in TARGET_H_VALUES:
+                    exact_h_results.append(_exact_case_result(method, n, best_epsilon, target_h))
+
+            _plot_error_vs_epsilon(
+                exact_epsilon_results,
+                method,
                 n,
-                epsilon,
-                num_intervals=fd_num_intervals,
-                max_iterations=fd_max_iterations,
+                OUTPUT_DIR / f"exact_{method.lower()}_n_{n:g}_error_vs_epsilon.png",
+                value_field="error_inf",
+                title_prefix="Error vs epsilon",
+            )
+            _plot_error_vs_h(
+                exact_h_results,
+                method,
+                n,
+                OUTPUT_DIR / f"exact_{method.lower()}_n_{n:g}_error_vs_h.png",
+                value_field="error_inf",
+                title_prefix="Error vs h",
             )
 
-            results.extend([rk_result, fd_result])
+        for n in special_n_values:
+            reference = _build_special_reference(n)
+            for epsilon in EPSILON_VALUES:
+                special_epsilon_results.append(
+                    _special_case_result(method, n, epsilon, FIXED_H_FOR_EPSILON_STUDY, reference)
+                )
 
-            if rk_solution is not None and rk_result.converged:
-                rk_solutions[epsilon] = rk_solution
-            if fd_solution is not None and fd_result.converged:
-                fd_solutions[epsilon] = fd_solution
+            try:
+                best_epsilon = _best_epsilon_special(special_epsilon_results, method, n)
+            except ValueError:
+                best_epsilon = None
+            if best_epsilon is not None:
+                for target_h in TARGET_H_VALUES:
+                    special_h_results.append(_special_case_result(method, n, best_epsilon, target_h, reference))
 
-        if rk_solutions:
-            _plot_method_comparison(n, rk_solutions, "RK4", OUTPUT_DIR / f"rk4_n_{n:g}_solutions.png")
-            _plot_error_curves(n, rk_solutions, "RK4", OUTPUT_DIR / f"rk4_n_{n:g}_errors.png")
-
-        if fd_solutions:
-            _plot_method_comparison(
+            _plot_error_vs_epsilon(
+                special_epsilon_results,
+                method,
                 n,
-                fd_solutions,
-                "FiniteDifference",
-                OUTPUT_DIR / f"fd_n_{n:g}_solutions.png",
+                OUTPUT_DIR / f"special_{method.lower()}_n_{n:g}_error_vs_epsilon.png",
+                value_field="max_node_error",
+                title_prefix="Max node error vs epsilon",
             )
-            _plot_error_curves(
+            _plot_error_vs_h(
+                special_h_results,
+                method,
                 n,
-                fd_solutions,
-                "FiniteDifference",
-                OUTPUT_DIR / f"fd_n_{n:g}_errors.png",
+                OUTPUT_DIR / f"special_{method.lower()}_n_{n:g}_error_vs_h.png",
+                value_field="max_node_error",
+                title_prefix="Max node error vs h",
             )
 
-        _write_pointwise_reference_comparison(
-            n,
-            rk_solutions,
-            fd_solutions,
-            OUTPUT_DIR / f"reference_pointwise_n_{n:g}.csv",
-        )
-
-    _write_error_table(results, OUTPUT_DIR / "initialization_error_table.csv")
-    _write_summary_table(results, OUTPUT_DIR / "initialization_error_summary.csv")
-    _write_convergence_report(results, OUTPUT_DIR / "initialization_convergence.txt")
-    return results
+    _write_exact_tables(exact_epsilon_results, exact_h_results)
+    _write_special_tables(special_epsilon_results, special_h_results)
+    _write_convergence_report(exact_h_results, special_h_results)
 
 
 if __name__ == "__main__":

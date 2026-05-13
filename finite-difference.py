@@ -208,8 +208,8 @@ def solve_lane_emden_finite_difference(
     The first quantity checks whether the discrete equation is satisfied, while
     the second checks whether the iterate itself has stabilized.
     """
-    if not (0.0 <= n < 5.0):
-        raise ValueError("n must satisfy 0 <= n < 5.")
+    if not (0.0 <= n <= 5.0):
+        raise ValueError("n must satisfy 0 <= n <= 5.")
     if epsilon <= 0:
         raise ValueError("epsilon must be positive.")
     if num_intervals < 2:

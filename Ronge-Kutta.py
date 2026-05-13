@@ -84,7 +84,7 @@ def solve_lane_emden_rk4(
     Parameters
     ----------
     n:
-        Polytropic index. This implementation is intended for 0 <= n < 5.
+        Polytropic index. This implementation is intended for 0 <= n <= 5.
     epsilon:
         Positive starting point. The initial value at xi=epsilon is produced
         by Taylor expansion around xi=0.
@@ -101,8 +101,8 @@ def solve_lane_emden_rk4(
     max_steps:
         Safety cap for long integrations, especially when n is close to 5.
     """
-    if not (0.0 <= n < 5.0):
-        raise ValueError("n must satisfy 0 <= n < 5.")
+    if not (0.0 <= n <= 5.0):
+        raise ValueError("n must satisfy 0 <= n <= 5.")
     if epsilon <= 0:
         raise ValueError("epsilon must be positive.")
     if h <= 0:
