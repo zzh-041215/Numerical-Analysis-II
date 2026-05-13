@@ -62,6 +62,7 @@ def build_residual(theta: np.ndarray, xi: np.ndarray, n: float) -> np.ndarray:
     )
 
 
+#Build the Jacobian of the finite-difference equations in sparse tridiagonal form.
 def build_jacobian_tridiagonal(
     theta: np.ndarray,
     xi: np.ndarray,
@@ -85,7 +86,7 @@ def build_jacobian_tridiagonal(
     upper = upper_full[:-1].copy()
     return lower, diagonal.copy(), upper
 
-
+# Using the Thomas algorithm to solve the tridiagonal linear system
 def solve_tridiagonal(
     lower: np.ndarray,
     diagonal: np.ndarray,
@@ -94,6 +95,7 @@ def solve_tridiagonal(
 ) -> np.ndarray:
     """Solve a tridiagonal linear system in O(N) by the Thomas algorithm."""
     n_unknowns = diagonal.size
+    # marginal test
     if rhs.size != n_unknowns:
         raise ValueError("rhs and diagonal must have the same length.")
     if lower.size != max(0, n_unknowns - 1) or upper.size != max(0, n_unknowns - 1):
@@ -129,7 +131,7 @@ def newton_step(theta: np.ndarray, xi: np.ndarray, n: float) -> tuple[np.ndarray
     delta_inner = solve_tridiagonal(lower, diagonal, upper, -residual)
     return delta_inner, float(np.linalg.norm(residual, ord=np.inf))
 
-
+# Use a damped Newton update to ensure the positivity of the interior profile.
 def damped_update(
     theta: np.ndarray,
     xi: np.ndarray,
