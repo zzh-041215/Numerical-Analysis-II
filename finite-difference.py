@@ -93,7 +93,6 @@ def solve_tridiagonal(
     upper: np.ndarray,
     rhs: np.ndarray,
 ) -> np.ndarray:
-    """Solve a tridiagonal linear system in O(N) by the Thomas algorithm."""
     n_unknowns = diagonal.size
     # marginal test
     if rhs.size != n_unknowns:
