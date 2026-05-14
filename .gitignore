@@ -3,3 +3,8 @@
 *.pyc
 \output_initial
 Course project.pdf
+*.ipynb
+*.zip
+*.tar
+*.rar
+*.html
