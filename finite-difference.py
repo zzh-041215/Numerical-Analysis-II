@@ -141,7 +141,6 @@ def damped_update(
     *,
     min_damping: float = 1e-4,
 ) -> tuple[np.ndarray, float, float]:
-    """Apply a damped Newton update that keeps the interior profile positive."""
     damping = 1.0
     best_theta = theta.copy()
     best_residual = residual_norm

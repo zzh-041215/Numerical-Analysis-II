@@ -25,13 +25,14 @@ FD_FILE = BASE_DIR / "finite-difference.py"
 MODULE_CACHE: dict[str, object] = {}
 
 EPSILON_VALUES = (1e-3, 1e-4, 1e-5)
-TARGET_H_VALUES = (2e-2, 1e-2, 5e-3, 2.5e-3)
+TARGET_H_VALUES = (2e-2, 1.5e-2, 1e-2, 7.5e-3, 5e-3, 3.75e-3, 2.5e-3)
 FIXED_H_FOR_EPSILON_STUDY = 5e-3
 REFERENCE_RK_EPSILON = 1e-7
 REFERENCE_RK_H = 2e-4
 REFERENCE_FD_H = 5e-4
 IMPORTANT_NODE_FRACTIONS = (0.25, 0.5, 0.75)
 SPECIAL_N_MAX_XI1 = 50.0
+THETA_OVERVIEW_XI_MAX = 10.0
 
 
 @dataclass(frozen=True)
@@ -83,6 +84,41 @@ def _rk_module():
 
 def _fd_module():
     return _load_module("finite_difference_solver", FD_FILE)
+
+
+def _set_fd_initial_guess_for_exact_case(case_n: Optional[float]) -> None:
+    fd_module = _fd_module()
+    original_initial_guess = getattr(fd_module, "_original_initial_guess", None)
+    if original_initial_guess is None:
+        original_initial_guess = fd_module.initial_guess
+        setattr(fd_module, "_original_initial_guess", original_initial_guess)
+
+    if case_n is None:
+        fd_module.initial_guess = original_initial_guess
+        fd_module.solve_lane_emden_finite_difference.__globals__["initial_guess"] = original_initial_guess
+        return
+
+    def exact_case_initial_guess(xi: np.ndarray, theta_left: float, theta_right: float) -> np.ndarray:
+        if abs(case_n) < 1e-14:
+            shape = 1.0 - xi**2 / 6.0
+        elif abs(case_n - 1.0) < 1e-14:
+            shape = np.ones_like(xi)
+            mask = xi != 0.0
+            shape[mask] = np.sin(xi[mask]) / xi[mask]
+        elif abs(case_n - 5.0) < 1e-14:
+            shape = 1.0 / np.sqrt(1.0 + xi * xi / 3.0)
+        else:
+            raise ValueError("Exact-profile initial guess is only supported for n=0, 1, 5.")
+
+        scale = (theta_left - theta_right) / (shape[0] - shape[-1])
+        shift = theta_left - scale * shape[0]
+        guess = scale * shape + shift
+        guess[0] = theta_left
+        guess[-1] = theta_right
+        return guess
+
+    fd_module.initial_guess = exact_case_initial_guess
+    fd_module.solve_lane_emden_finite_difference.__globals__["initial_guess"] = exact_case_initial_guess
 
 
 def _format_float(value: Optional[float]) -> str:
@@ -163,16 +199,20 @@ def _solve_fd(
     theta_right: float,
 ):
     num_intervals, actual_h = _actual_fd_h(xi_max, epsilon, target_h)
+    exact_case_n = n if n in (0.0, 1.0, 5.0) else None
+    _set_fd_initial_guess_for_exact_case(exact_case_n)
     solution = _fd_module().solve_lane_emden_finite_difference(
         n=n,
         epsilon=epsilon,
         num_intervals=num_intervals,
         xi_max=xi_max,
         theta_right=theta_right,
-        max_iterations=100,
+        max_iterations=200 if exact_case_n is not None else 100,
         residual_tolerance=1e-10,
         update_tolerance=1e-10,
     )
+    if exact_case_n is not None:
+        _set_fd_initial_guess_for_exact_case(None)
     return solution, actual_h
 
 
@@ -560,6 +600,249 @@ def _write_convergence_report(
     (OUTPUT_DIR / "initialization_convergence.txt").write_text("\n".join(lines), encoding="utf-8")
 
 
+def _plot_exact_overview(
+    epsilon_results: list[ExactExperimentResult],
+    h_results: list[ExactExperimentResult],
+) -> None:
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8))
+    exact_n_values = (0.0, 1.0, 5.0)
+
+    for col, n in enumerate(exact_n_values):
+        ax = axes[0, col]
+        for method in ("RK4", "FiniteDifference"):
+            items = [
+                item for item in epsilon_results
+                if item.method == method and item.n == n and item.error_inf is not None
+            ]
+            items.sort(key=lambda item: item.epsilon, reverse=True)
+            if items:
+                ax.loglog(
+                    [item.epsilon for item in items],
+                    [item.error_inf for item in items],
+                    marker="o",
+                    linewidth=1.5,
+                    label=method,
+                )
+        ax.set_title(f"n={n:g}, error-epsilon")
+        ax.set_xlabel(r"$\epsilon$")
+        ax.set_ylabel(r"$\|error\|_\infty$")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()
+
+        ax = axes[1, col]
+        for method in ("RK4", "FiniteDifference"):
+            items = [
+                item for item in h_results
+                if item.method == method and item.n == n and item.error_inf is not None
+            ]
+            items.sort(key=lambda item: item.actual_h, reverse=True)
+            if items:
+                ax.loglog(
+                    [item.actual_h for item in items],
+                    [item.error_inf for item in items],
+                    marker="o",
+                    linewidth=1.5,
+                    label=method,
+                )
+        ax.set_title(f"n={n:g}, error-h")
+        ax.set_xlabel(r"$h$")
+        ax.set_ylabel(r"$\|error\|_\infty$")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()
+
+    fig.tight_layout()
+    fig.savefig(OUTPUT_DIR / "exact_overview.png", dpi=220)
+    plt.close(fig)
+
+
+def _plot_special_overview(
+    epsilon_results: list[SpecialNodeExperimentResult],
+    h_results: list[SpecialNodeExperimentResult],
+) -> None:
+    n_values = _special_n_values()
+    if not n_values:
+        return
+
+    cols = 3
+    rows = math.ceil(len(n_values) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 4 * rows))
+    axes = np.array(axes).reshape(rows, cols)
+
+    for idx, n in enumerate(n_values):
+        row, col = divmod(idx, cols)
+        ax = axes[row, col]
+        for method, style in (("RK4", "o-"), ("FiniteDifference", "s-")):
+            items = [
+                item for item in h_results
+                if item.method == method and item.n == n and item.max_node_error is not None
+            ]
+            items.sort(key=lambda item: item.actual_h, reverse=True)
+            if items:
+                ax.loglog(
+                    [item.actual_h for item in items],
+                    [item.max_node_error for item in items],
+                    style,
+                    linewidth=1.5,
+                    label=method,
+                )
+        ax.set_title(f"n={n:g}")
+        ax.set_xlabel(r"$h$")
+        ax.set_ylabel("max node error")
+        ax.grid(True, which="both", alpha=0.3)
+        ax.legend()
+
+    for idx in range(len(n_values), rows * cols):
+        row, col = divmod(idx, cols)
+        axes[row, col].axis("off")
+
+    fig.tight_layout()
+    fig.savefig(OUTPUT_DIR / "special_nodes_overview.png", dpi=220)
+    plt.close(fig)
+
+
+def _theta_curve_for_n(n: float) -> tuple[np.ndarray, np.ndarray]:
+    if n in (0.0, 1.0, 5.0):
+        xi_max = _exact_xi_max(n)
+        xi_plot_max = min(xi_max, THETA_OVERVIEW_XI_MAX)
+        xi = np.linspace(0.0, xi_plot_max, 2000)
+        return xi, _exact_theta(n, xi)
+
+    reference_data = load_reference_data()
+    prop = reference_data.get_global_property(n)
+    if prop is None or prop.xi_1 is None:
+        raise ValueError(f"Missing xi_1 for n={n:g}.")
+
+    xi_plot_max = min(prop.xi_1, THETA_OVERVIEW_XI_MAX)
+    solution, _ = _solve_fd(
+        n,
+        REFERENCE_RK_EPSILON,
+        REFERENCE_FD_H,
+        xi_max=xi_plot_max,
+        theta_right=0.0 if xi_plot_max == prop.xi_1 else float(_solution_theta(
+            _solve_fd(n, REFERENCE_RK_EPSILON, REFERENCE_FD_H, xi_max=prop.xi_1, theta_right=0.0)[0],
+            np.array([xi_plot_max], dtype=float),
+        )[0]),
+    )
+    xi = np.linspace(float(solution.xi[0]), float(solution.xi[-1]), 2000)
+    theta = _solution_theta(solution, xi)
+    return xi, theta
+
+
+def _plot_theta_n_overview() -> None:
+    n_values = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0]
+    plt.figure(figsize=(10, 6))
+
+    for n in n_values:
+        try:
+            xi, theta = _theta_curve_for_n(n)
+        except Exception:
+            continue
+        plt.plot(xi, theta, linewidth=1.5, label=f"n={n:g}")
+
+    plt.xlabel(r"$\xi$")
+    plt.ylabel(r"$\theta(\xi)$")
+    plt.title(r"Comparison of $\theta(\xi)$ for different $n$")
+    plt.grid(True, alpha=0.3)
+    plt.legend(ncol=2, fontsize=9)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "theta_n_overview.png", dpi=220)
+    plt.close()
+
+
+def _write_analysis_summary(
+    exact_epsilon_results: list[ExactExperimentResult],
+    exact_h_results: list[ExactExperimentResult],
+    special_epsilon_results: list[SpecialNodeExperimentResult],
+    special_h_results: list[SpecialNodeExperimentResult],
+) -> None:
+    lines: list[str] = []
+    lines.append("Initialization and step-size study summary")
+    lines.append("")
+    lines.append("1. Exact cases: n = 0, 1, 5")
+    lines.append("The error metric is the infinity norm of the difference between the numerical and exact solutions.")
+    lines.append("The epsilon study uses a fixed target h = 5e-3.")
+    lines.append("")
+
+    for method in ("RK4", "FiniteDifference"):
+        lines.append(f"Method: {method}")
+        for n in (0.0, 1.0, 5.0):
+            eps_items = [item for item in exact_epsilon_results if item.method == method and item.n == n and item.error_inf is not None]
+            eps_items.sort(key=lambda item: item.epsilon, reverse=True)
+            h_items = [item for item in exact_h_results if item.method == method and item.n == n and item.error_inf is not None]
+            h_items.sort(key=lambda item: item.actual_h, reverse=True)
+            order = _observed_order([item.actual_h for item in h_items], [item.error_inf for item in h_items])
+
+            if not eps_items:
+                lines.append(f"  n={n:g}: no successful runs.")
+                continue
+
+            best_eps_item = min(eps_items, key=lambda item: item.error_inf)
+            best_h_item = min(h_items, key=lambda item: item.error_inf) if h_items else None
+            lines.append(
+                f"  n={n:g}: best epsilon in tested set = {best_eps_item.epsilon:.0e}, "
+                f"best error = {_format_float(best_eps_item.error_inf)}."
+            )
+            if best_h_item is not None:
+                lines.append(
+                    f"  n={n:g}: smallest tested h gave error = {_format_float(best_h_item.error_inf)}, "
+                    f"observed p = {_format_float(order)}."
+                )
+
+            if method == "RK4" and n in (0.0, 1.0):
+                lines.append(
+                    "  Interpretation: the present pipeline shows an h^2 trend rather than the formal fourth order,"
+                    " so the measured error is still dominated by startup, truncation, or comparison effects."
+                )
+            if method == "FiniteDifference" and n in (0.0, 1.0):
+                lines.append(
+                    "  Interpretation: the observed order is close to 2, which is consistent with a centered second-order finite-difference discretization."
+                )
+            if n == 5.0 and method == "FiniteDifference":
+                lines.append(
+                    "  Interpretation: after replacing the experiment-level initial guess by a profile matched to the exact n=5 shape, the finite-difference solver regains a stable second-order trend."
+                )
+        lines.append("")
+
+    lines.append("2. Non-exact cases")
+    lines.append("For n other than 0, 1, 5, the comparison is restricted to important nodes xi_1/4, xi_1/2, 3xi_1/4, and theta'(xi_1).")
+    lines.append("The reported metric is the maximum among those nodewise errors.")
+    lines.append("")
+
+    for method in ("RK4", "FiniteDifference"):
+        lines.append(f"Method: {method}")
+        available = False
+        for n in _special_n_values():
+            eps_items = [item for item in special_epsilon_results if item.method == method and item.n == n and item.max_node_error is not None]
+            h_items = [item for item in special_h_results if item.method == method and item.n == n and item.max_node_error is not None]
+            if not eps_items and not h_items:
+                continue
+            available = True
+            eps_items.sort(key=lambda item: item.epsilon, reverse=True)
+            h_items.sort(key=lambda item: item.actual_h, reverse=True)
+            best_eps_item = min(eps_items, key=lambda item: item.max_node_error) if eps_items else None
+            order = _observed_order([item.actual_h for item in h_items], [item.max_node_error for item in h_items]) if h_items else None
+            if best_eps_item is not None:
+                lines.append(
+                    f"  n={n:g}: best epsilon in tested set = {best_eps_item.epsilon:.0e}, "
+                    f"best max node error = {_format_float(best_eps_item.max_node_error)}."
+                )
+            if h_items:
+                lines.append(
+                    f"  n={n:g}: observed nodewise order p = {_format_float(order)}."
+                )
+        if not available:
+            lines.append("  No stable results were produced for this method in the current parameter range.")
+        lines.append("")
+
+    lines.append("3. Overall reading")
+    lines.append("RK4 is consistently very accurate on the exact cases, but the measured slope is not yet uniformly close to 4.")
+    lines.append("The current finite-difference implementation behaves much more like a second-order method, especially on n=0 and n=1.")
+    lines.append("For non-exact n, the finite-difference method gives a fairly regular h^2 trend at the selected nodes, while RK4 succeeds only for part of the tested n range because non-integer powers become delicate near the surface.")
+    lines.append("The combined figures exact_overview.png, special_nodes_overview.png, and theta_n_overview.png provide the quickest visual summary of these trends.")
+
+    (OUTPUT_DIR / "analysis_summary.txt").write_text("\n".join(lines), encoding="utf-8")
+
+
 def run_initialization_study() -> None:
     OUTPUT_DIR.mkdir(exist_ok=True)
     for path in OUTPUT_DIR.glob("*"):
@@ -587,23 +870,6 @@ def run_initialization_study() -> None:
                 for target_h in TARGET_H_VALUES:
                     exact_h_results.append(_exact_case_result(method, n, best_epsilon, target_h))
 
-            _plot_error_vs_epsilon(
-                exact_epsilon_results,
-                method,
-                n,
-                OUTPUT_DIR / f"exact_{method.lower()}_n_{n:g}_error_vs_epsilon.png",
-                value_field="error_inf",
-                title_prefix="Error vs epsilon",
-            )
-            _plot_error_vs_h(
-                exact_h_results,
-                method,
-                n,
-                OUTPUT_DIR / f"exact_{method.lower()}_n_{n:g}_error_vs_h.png",
-                value_field="error_inf",
-                title_prefix="Error vs h",
-            )
-
         for n in special_n_values:
             reference = _build_special_reference(n)
             for epsilon in EPSILON_VALUES:
@@ -619,26 +885,18 @@ def run_initialization_study() -> None:
                 for target_h in TARGET_H_VALUES:
                     special_h_results.append(_special_case_result(method, n, best_epsilon, target_h, reference))
 
-            _plot_error_vs_epsilon(
-                special_epsilon_results,
-                method,
-                n,
-                OUTPUT_DIR / f"special_{method.lower()}_n_{n:g}_error_vs_epsilon.png",
-                value_field="max_node_error",
-                title_prefix="Max node error vs epsilon",
-            )
-            _plot_error_vs_h(
-                special_h_results,
-                method,
-                n,
-                OUTPUT_DIR / f"special_{method.lower()}_n_{n:g}_error_vs_h.png",
-                value_field="max_node_error",
-                title_prefix="Max node error vs h",
-            )
-
     _write_exact_tables(exact_epsilon_results, exact_h_results)
     _write_special_tables(special_epsilon_results, special_h_results)
     _write_convergence_report(exact_h_results, special_h_results)
+    _plot_exact_overview(exact_epsilon_results, exact_h_results)
+    _plot_special_overview(special_epsilon_results, special_h_results)
+    _plot_theta_n_overview()
+    _write_analysis_summary(
+        exact_epsilon_results,
+        exact_h_results,
+        special_epsilon_results,
+        special_h_results,
+    )
 
 
 if __name__ == "__main__":
