@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -242,7 +249,7 @@ if __name__ == "__main__":
     print(f"  psi(xi_max) = {psi_fd[-1]:.6f}")
 
     # Plot
-    output_dir = Path(__file__).resolve().parent / "output_initial"
+    output_dir = Path(__file__).resolve().parent.parent / "output_initial"
     output_dir.mkdir(exist_ok=True)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))

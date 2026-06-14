@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -279,7 +286,7 @@ if __name__ == "__main__":
 
     import importlib.util
     import sys
-    rk_path = Path(__file__).resolve().parent / "Ronge-Kutta.py"
+    rk_path = Path(__file__).resolve().parent / "rk4.py"
     spec = importlib.util.spec_from_file_location("rk4_solver", rk_path)
     rk4_mod = importlib.util.module_from_spec(spec)
     sys.modules["rk4_solver"] = rk4_mod
@@ -365,7 +372,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from pathlib import Path
 
-    OUTPUT_DIR = Path(__file__).resolve().parent / "output_initial"
+    OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output_initial"
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -430,8 +437,14 @@ if __name__ == "__main__":
         ax.legend()
         ax.grid(True, which="both", alpha=0.3)
 
+    # Add annotation explaining n=5 exclusion
+    fig.text(0.5, 0.01,
+             "Note: n=5 excluded — near-critical polytrope requires special handling (extremely large ξ₁, stiff near surface).\n"
+             "For n<5, adaptive RK5(4) achieves target accuracy with far fewer RHS evaluations than fixed-step RK4.",
+             ha="center", fontsize=8, fontstyle="italic", color="gray")
+
     fig.suptitle("Fixed-RK4 vs Adaptive-RK5(4): Accuracy vs Cost", fontsize=13)
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0.05, 1, 1])
     plt.savefig(OUTPUT_DIR / "adaptive_rk_efficiency.png", dpi=200)
     plt.close()
     print(f"\nPlot saved to {OUTPUT_DIR / 'adaptive_rk_efficiency.png'}")

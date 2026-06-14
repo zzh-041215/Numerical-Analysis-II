@@ -14,13 +14,18 @@ import numpy as np
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# Ensure project root is on sys.path
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from data_input import load_reference_data
 
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = _ROOT
 OUTPUT_DIR = BASE_DIR / "output_initial"
-RK_FILE = BASE_DIR / "Ronge-Kutta.py"
-FD_FILE = BASE_DIR / "finite-difference.py"
+RK_FILE = BASE_DIR / "solvers" / "rk4.py"
+FD_FILE = BASE_DIR / "solvers" / "fd.py"
 
 MODULE_CACHE: dict[str, object] = {}
 

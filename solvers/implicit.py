@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -226,7 +233,7 @@ if __name__ == "__main__":
         print("  RK4 (explicit):")
         from pathlib import Path
         import importlib.util, sys
-        rk_path = Path(__file__).resolve().parent / "Ronge-Kutta.py"
+        rk_path = Path(__file__).resolve().parent / "rk4.py"
         spec = importlib.util.spec_from_file_location("rk_temp2", rk_path)
         rk_mod = importlib.util.module_from_spec(spec)
         sys.modules["rk_temp2"] = rk_mod

@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import LaneEmdenPoint, load_reference_data
 
@@ -263,7 +270,7 @@ if __name__ == "__main__":
         print(f"    Steps: {sol.num_steps}")
 
     # Plot
-    output_dir = Path(__file__).resolve().parent / "output_initial"
+    output_dir = Path(__file__).resolve().parent.parent / "output_initial"
     output_dir.mkdir(exist_ok=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))

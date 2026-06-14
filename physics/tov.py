@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -197,37 +204,104 @@ if __name__ == "__main__":
     for s, r, m in zip(sigmas, radii, masses):
         print(f"  sigma={s:.2f}: R={r:.4f}, M={m:.4f}")
 
-    # Plot
-    output_dir = Path(__file__).resolve().parent / "output_initial"
+    # Plot (2x2 layout)
+    output_dir = Path(__file__).resolve().parent.parent / "output_initial"
     output_dir.mkdir(exist_ok=True)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
 
-    # Density profiles for different sigma
+    # --- Top-Left: Density profiles for different sigma ---
+    ax1 = axes[0, 0]
     n_plot = 1.5
+    sigma_colors = {0.0: "blue", 0.1: "green", 0.2: "orange", 0.3: "red"}
     for s in (0.0, 0.1, 0.2, 0.3):
         sol = solve_tov_rk4(n=n_plot, sigma=s, epsilon=1e-4, h=2e-3)
-        ax1.plot(sol.xi, sol.theta, linewidth=1.5,
-                 label=f"sigma={s:.1f}")
+        ax1.plot(sol.xi, sol.theta, linewidth=1.5, color=sigma_colors[s],
+                 label=f"σ={s:.1f}")
     ax1.set_xlabel(r"$\xi$")
     ax1.set_ylabel(r"$\theta(\xi)$")
-    ax1.set_title(f"TOV: Density profiles, n={n_plot}")
-    ax1.legend()
+    ax1.set_title(f"Density Profiles: n={n_plot} at various σ")
+    ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
+    ax1.annotate(
+        r"$\sigma = P_c / (\rho_c c^2)$" + "\n"
+        r"$\sigma = 0$ → Newtonian LE" + "\n"
+        r"$\sigma > 0$ → GR correction" + "\n"
+        "Larger σ → more compact star",
+        xy=(0.97, 0.97), xycoords="axes fraction", fontsize=8,
+        ha="right", va="top",
+        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 
-    # Mass-radius curves
+    # --- Top-Right: Mass-Radius curves ---
+    ax2 = axes[0, 1]
+    sigma_vals = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
     for n_mr in (1.0, 1.5, 2.0):
-        sigs, rads, mass = mass_radius_curve(n_mr, sigma_vals,
-                                              epsilon=1e-4, h=2e-3)
-        if rads and mass:
-            ax2.plot(rads, mass, "o-", linewidth=1.2,
-                     label=f"n={n_mr:g}")
+        sigs, rads, masses = mass_radius_curve(n_mr, sigma_vals, epsilon=1e-4, h=2e-3)
+        if rads and masses:
+            ax2.plot(rads, masses, "o-", linewidth=1.2, label=f"n={n_mr:g}")
+            # Annotate σ direction on the last curve
+            if n_mr == 1.5 and len(rads) >= 2:
+                mid = len(rads) // 2
+                ax2.annotate("σ↑", (rads[mid], masses[mid]),
+                             fontsize=9, color="red",
+                             arrowprops=dict(arrowstyle="->", color="red"))
     ax2.set_xlabel("Radius (dimensionless)")
     ax2.set_ylabel("Mass (dimensionless)")
-    ax2.set_title("TOV Mass-Radius Relations")
-    ax2.legend()
+    ax2.set_title("Mass-Radius Relation")
+    ax2.legend(fontsize=8)
     ax2.grid(True, alpha=0.3)
+    ax2.annotate("σ increases →\nstar becomes more compact\n(mass increases at fixed radius)",
+                 xy=(0.03, 0.97), xycoords="axes fraction", fontsize=8,
+                 va="top", bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
 
+    # --- Bottom-Left: Newtonian limit comparison ---
+    ax3 = axes[1, 0]
+    ax3.axis("off")
+    ref = load_reference_data()
+    table_data = []
+    for n_val in (0.0, 1.0, 3.0):
+        sol_tov = solve_tov_rk4(n=n_val, sigma=0.0, epsilon=1e-4, h=1e-3)
+        prop = ref.get_global_property(n_val)
+        tov_xi1 = f"{sol_tov.first_zero:.6f}" if sol_tov.first_zero else "N/A"
+        le_xi1 = f"{prop.xi_1:.6f}" if prop and prop.xi_1 else "N/A"
+        tov_mass = f"{sol_tov.total_mass:.6f}" if sol_tov.total_mass else "N/A"
+        le_mass = f"{prop.mass:.6f}" if prop and prop.mass else "N/A"
+        table_data.append([f"n={n_val:g}", tov_xi1, le_xi1, tov_mass, le_mass])
+
+    col_labels = ["n", "TOV ξ₁", "LE ξ₁", "TOV mass", "LE mass"]
+    table = ax3.table(cellText=table_data, colLabels=col_labels,
+                      cellLoc="center", loc="center")
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.0, 1.8)
+    ax3.set_title("Newtonian Limit (σ=0): TOV vs Standard LE", fontsize=11,
+                  fontweight="bold")
+
+    # --- Bottom-Right: Physical explanation ---
+    ax4 = axes[1, 1]
+    ax4.axis("off")
+    explanation = (
+        "TOV Equations (Relativistic Polytropes)\n\n"
+        "Equations (dimensionless):\n"
+        "  dθ/dξ = -(θⁿ+1)(m+σξ³θⁿ) / [ξ²(1-2σm/ξ)]\n"
+        "  dm/dξ = ξ² θⁿ\n\n"
+        "Parameters:\n"
+        "  σ = P_c/(ρ_c c²)  — relativistic factor\n"
+        "  σ=0 → Newtonian Lane-Emden\n"
+        "  σ~0.3-0.5 → neutron star regime\n\n"
+        "Key Physics:\n"
+        "  - GR gravity is stronger → stars are\n"
+        "    more compact at same central density\n"
+        "  - There exists a maximum mass for\n"
+        "    stable configurations (Chandrasekhar limit)\n"
+        "  - n=3, σ→critical → mass approaches constant\n"
+        "    (independent of central density)"
+    )
+    ax4.text(0.1, 0.5, explanation, transform=ax4.transAxes, fontsize=9,
+             verticalalignment="center", fontfamily="monospace",
+             bbox=dict(boxstyle="round", facecolor="lightcyan", alpha=0.8))
+
+    fig.suptitle("TOV Equation: Relativistic Polytropes", fontsize=14)
     plt.tight_layout()
     plt.savefig(output_dir / "tov_overview.png", dpi=200)
     plt.close()

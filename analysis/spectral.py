@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -202,7 +209,7 @@ if __name__ == "__main__":
     print("Chebyshev Spectral Method for Lane-Emden Equation")
     print("=" * 70)
 
-    OUTPUT_DIR = Path(__file__).resolve().parent / "output_initial"
+    OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output_initial"
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     # Collect data for plot
@@ -244,34 +251,77 @@ if __name__ == "__main__":
                 print(f"  N={N:3d}: FAILED - {str(e)[:60]}")
         plot_data[n_val] = (Ns_ok, errors)
 
-    # Spectral convergence plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    # Spectral method visualization (2x2 layout)
+    fig, axes = plt.subplots(2, 2, figsize=(14, 11))
 
+    # --- Top-Left: Convergence curves ---
+    ax1 = axes[0, 0]
     for n_val, (Ns, errors) in plot_data.items():
         if errors:
             ax1.semilogy(Ns, errors, "o-", linewidth=1.5, label=f"n={n_val:g}")
-
-    # Add reference O(N^(-N)) line for comparison
     N_ref = np.array([10, 40])
     ax1.semilogy(N_ref, np.exp(-0.3 * N_ref), "k:", linewidth=1, alpha=0.5, label=r"$\sim e^{-cN}$")
     ax1.set_xlabel("N (Chebyshev nodes)")
-    ax1.set_ylabel(r"$\|\theta - \theta_{exact}\|_\infty$")
-    ax1.set_title("Spectral Convergence (exact cases)")
-    ax1.legend()
+    ax1.set_ylabel(r"$\|\theta - \theta_{\rm exact}\|_\infty$")
+    ax1.set_title("Spectral Convergence")
+    ax1.legend(fontsize=8)
     ax1.grid(True, alpha=0.3)
+    ax1.annotate("Exponential convergence:\nerror ~ exp(-cN)", xy=(0.55, 0.85),
+                 xycoords="axes fraction", fontsize=9, color="navy",
+                 bbox=dict(boxstyle="round", fc="lightyellow", alpha=0.8))
 
-    # Solution profiles
+    # --- Top-Right: Chebyshev node distribution ---
+    ax2 = axes[0, 1]
+    xi_max_demo = 6.0
+    for N_demo in (12, 20, 30):
+        x_cheb_demo = chebyshev_grid(N_demo)
+        xi_demo = map_to_physical(x_cheb_demo, -xi_max_demo, xi_max_demo)
+        ax2.plot(xi_demo, np.zeros_like(xi_demo) + N_demo, "o",
+                 markersize=4, label=f"N={N_demo}", alpha=0.8)
+    ax2.axvline(0, color="red", linestyle="--", linewidth=1.5, alpha=0.6, label=r"$\xi=0$ (even extension)")
+    ax2.set_xlabel(r"$\xi$")
+    ax2.set_ylabel("N (resolution)")
+    ax2.set_title("Chebyshev-Gauss-Lobatto Nodes on [-ξ_max, ξ_max]")
+    ax2.legend(fontsize=8)
+    ax2.grid(True, alpha=0.3)
+    ax2.annotate("Even extension → avoids\nsingularity at ξ=0\n(grid never at ξ=0)",
+                 xy=(0.05, 0.15), xycoords="axes fraction", fontsize=9, color="darkgreen",
+                 bbox=dict(boxstyle="round", fc="lightyellow", alpha=0.8))
+
+    # --- Bottom-Left: Solution profiles ---
+    ax3 = axes[1, 0]
     for n_val in (0.0, 1.5, 3.0):
         sol = solve_spectral_lane_emden(n=n_val, N=35,
                                         xi_max=load_reference_data().get_first_zero(n_val) or 7.0)
-        ax2.plot(sol.xi, sol.theta, linewidth=1.5, label=f"n={n_val:g}")
-    ax2.set_xlabel(r"$\xi$")
-    ax2.set_ylabel(r"$\theta(\xi)$")
-    ax2.set_title("Spectral Solutions")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
+        ax3.plot(sol.xi, sol.theta, linewidth=1.5, label=f"n={n_val:g}")
+    ax3.set_xlabel(r"$\xi$")
+    ax3.set_ylabel(r"$\theta(\xi)$")
+    ax3.set_title("Spectral Solutions (N=35)")
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
 
-    fig.suptitle("Chebyshev Spectral Method", fontsize=13)
+    # --- Bottom-Right: Method explanation ---
+    ax4 = axes[1, 1]
+    ax4.axis("off")
+    explanation = (
+        "Chebyshev Spectral Method\n\n"
+        "Principle:\n"
+        "- Map [-1,1] → [-ξ_max, ξ_max]\n"
+        "- Use even extension: θ(-ξ) = θ(ξ)\n"
+        "  → θ'(0) = 0 automatically satisfied\n"
+        "- Discretize on Chebyshev-Gauss-Lobatto nodes\n"
+        "- Solve nonlinear system via Newton iteration\n\n"
+        "Properties:\n"
+        "- Exponential (spectral) convergence\n"
+        "- Even N → accurate (even extension preserved)\n"
+        "- Odd N → breaks even symmetry → diverges\n"
+        "- Ideal for smooth solutions"
+    )
+    ax4.text(0.1, 0.5, explanation, transform=ax4.transAxes, fontsize=10,
+             verticalalignment="center", fontfamily="monospace",
+             bbox=dict(boxstyle="round", facecolor="lightcyan", alpha=0.8))
+
+    fig.suptitle("Chebyshev Spectral Method for Lane-Emden Equation", fontsize=14)
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "spectral_convergence.png", dpi=200)
     plt.close()

@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -306,14 +313,14 @@ if __name__ == "__main__":
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    BASE = Path(__file__).resolve().parent
+    BASE = Path(__file__).resolve().parent.parent
     OUTPUT_DIR = BASE / "output_initial"
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     # Load solver modules
     for mod_name, mod_path in [
-        ("rk_solver", BASE / "Ronge-Kutta.py"),
-        ("fd_solver", BASE / "finite-difference.py"),
+        ("rk_solver", BASE / "solvers" / "rk4.py"),
+        ("fd_solver", BASE / "solvers" / "fd.py"),
     ]:
         spec = importlib.util.spec_from_file_location(mod_name, mod_path)
         module = importlib.util.module_from_spec(spec)
@@ -371,7 +378,7 @@ if __name__ == "__main__":
                     print(f"    Error reduction at finest h: {ratio:.1f}x")
 
     # Generate convergence comparison plot
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
     for col, n_val in enumerate((0.0, 1.0, 5.0)):
         ax = axes[col]
         if abs(n_val) < 1e-14:
@@ -395,13 +402,21 @@ if __name__ == "__main__":
                 ax.loglog(data["hs"], data["raw_errors"], marker + "k", linewidth=1.2, alpha=0.4, label=f"{label} raw")
             if "rich_errors" in data and data["rich_errors"]:
                 ax.loglog(data["hs"], data["rich_errors"], marker, linewidth=1.5, label=f"{label} Richardson")
+                # Compute error reduction ratio
+                if data["raw_errors"] and data["rich_errors"]:
+                    ratio = data["raw_errors"][-1] / max(data["rich_errors"][-1], 1e-16)
+                    ax.annotate(f"  {ratio:.1f}× improvement\n  (limited: startup error\n   dominates O(h^p) term)",
+                                xy=(0.02, 0.02), xycoords="axes fraction",
+                                fontsize=7, color="darkred", va="bottom",
+                                bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8))
         ax.set_xlabel("h")
         ax.set_ylabel(r"$\|\theta_{num} - \theta_{exact}\|_\infty$")
         ax.set_title(f"n = {n_val:g}")
         ax.grid(True, which="both", alpha=0.3)
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
 
-    fig.suptitle("Richardson Extrapolation: Error vs Step Size", fontsize=13, y=1.02)
+    fig.suptitle("Richardson Extrapolation: Modest Improvement due to Startup Error Dominance",
+                 fontsize=13, y=1.02)
     plt.tight_layout()
     plt.savefig(OUTPUT_DIR / "richardson_convergence.png", dpi=200, bbox_inches="tight")
     plt.close()

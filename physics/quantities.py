@@ -3,7 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import (
     GlobalProperty,
@@ -267,7 +274,7 @@ def generate_physical_table(
         import sys
         from pathlib import Path
 
-        fd_path = Path(__file__).resolve().parent / "finite-difference.py"
+        fd_path = Path(__file__).resolve().parent.parent / "solvers" / "fd.py"
         spec = importlib.util.spec_from_file_location("fd_temp", fd_path)
         fd_mod = importlib.util.module_from_spec(spec)
         sys.modules["fd_temp"] = fd_mod
@@ -353,7 +360,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from pathlib import Path
 
-    OUTPUT_DIR = Path(__file__).resolve().parent / "output_initial"
+    OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output_initial"
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     # Collect computed and reference values
@@ -373,7 +380,7 @@ if __name__ == "__main__":
         try:
             # Quick FD solve
             import importlib.util, sys
-            fd_p = Path(__file__).resolve().parent / "finite-difference.py"
+            fd_p = Path(__file__).resolve().parent.parent / "solvers" / "fd.py"
             spec = importlib.util.spec_from_file_location("fd_pq", fd_p)
             fd_m = importlib.util.module_from_spec(spec)
             sys.modules["fd_pq"] = fd_m

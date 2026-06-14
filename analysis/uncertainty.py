@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+import sys
+from pathlib import Path
+
 import numpy as np
+
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 from data_input import load_reference_data
 
@@ -41,7 +48,7 @@ def estimate_physical_uncertainty(
         - values_per_h: list of values at each resolution
         - gci: Grid Convergence Index (if >=3 grids available)
     """
-    from physical_quantities import compute_physical_quantities
+    from physics.quantities import compute_physical_quantities
 
     h_values = sorted(h_values)  # finest to coarsest
 
@@ -197,7 +204,7 @@ if __name__ == "__main__":
     print("=" * 70)
 
     # Load FD solver for uncertainty analysis
-    fd_path = Path(__file__).resolve().parent / "finite-difference.py"
+    fd_path = Path(__file__).resolve().parent.parent / "solvers" / "fd.py"
     spec = importlib.util.spec_from_file_location("fd_unc", fd_path)
     fd_mod = importlib.util.module_from_spec(spec)
     sys.modules["fd_unc"] = fd_mod

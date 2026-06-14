@@ -47,8 +47,8 @@ def experiment_1_convergence_basic(quick: bool = False) -> str:
     """Basic convergence study using exact solutions (n=0, 1, 5)."""
     from data_input import load_reference_data
 
-    rk_mod = _load_module("rk", "Ronge-Kutta.py")
-    fd_mod = _load_module("fd", "finite-difference.py")
+    rk_mod = _load_module("rk", "solvers/rk4.py")
+    fd_mod = _load_module("fd", "solvers/fd.py")
 
     ref = load_reference_data()
 
@@ -129,7 +129,7 @@ def experiment_2_physical_quantities(quick: bool = False) -> str:
     """Compute physical quantities across n values."""
     from data_input import load_reference_data
 
-    pq_mod = _load_module("pq", "physical_quantities.py")
+    pq_mod = _load_module("pq", "physics/quantities.py")
 
     ref = load_reference_data()
     n_values = ref.available_global_n()
@@ -146,7 +146,7 @@ def experiment_2_physical_quantities(quick: bool = False) -> str:
 
 def experiment_3_geometry_comparison(quick: bool = False) -> str:
     """Compare Slab, Cylinder, Sphere geometries."""
-    geom_mod = _load_module("geom", "generalized_geometry.py")
+    geom_mod = _load_module("geom", "physics/geometry.py")
 
     n_values = [0.5, 1.5, 3.0]
     if quick:
@@ -173,7 +173,7 @@ def experiment_3_geometry_comparison(quick: bool = False) -> str:
 
 def experiment_4_manufactured_convergence(quick: bool = False) -> str:
     """MMS convergence verification."""
-    mms_mod = _load_module("mms", "manufactured.py")
+    mms_mod = _load_module("mms", "analysis/manufactured.py")
 
     n_values = [0.0, 1.5, 3.0]
     h_vals = [0.2, 0.1, 0.05, 0.025, 0.0125]
@@ -203,9 +203,8 @@ def experiment_5_method_comparison(quick: bool = False) -> str:
     import time as time_mod
 
     # Load all solver modules
-    rk4_mod = _load_module("rk4", "Ronge-Kutta.py")
-    shoot_mod = _load_module("shoot", "shooting.py")
-    rich_mod = _load_module("rich", "richardson.py")
+    rk4_mod = _load_module("rk4", "solvers/rk4.py")
+    shoot_mod = _load_module("shoot", "analysis/shooting.py")
 
     n_test = 1.0
     xi_max = math.pi
@@ -242,7 +241,7 @@ def experiment_5_method_comparison(quick: bool = False) -> str:
 
 def experiment_6_isothermal(quick: bool = False) -> str:
     """Isothermal sphere solution."""
-    iso_mod = _load_module("iso", "isothermal.py")
+    iso_mod = _load_module("iso", "physics/isothermal.py")
 
     lines = ["=" * 70,
              "Experiment 6: Isothermal Sphere (n -> infinity)",
@@ -264,7 +263,7 @@ def experiment_6_isothermal(quick: bool = False) -> str:
 
 def experiment_7_tov(quick: bool = False) -> str:
     """TOV mass-radius relations."""
-    tov_mod = _load_module("tov", "tov.py")
+    tov_mod = _load_module("tov", "physics/tov.py")
 
     n_values = [1.0, 1.5, 2.0]
     if quick:
@@ -288,25 +287,6 @@ def experiment_7_tov(quick: bool = False) -> str:
                 lines.append(f"{s:8.2f}  {r:12.6f}  {m:12.6f}")
         except Exception as e:
             lines.append(f"  FAILED: {e}")
-
-    return "\n".join(lines)
-
-
-def experiment_8_continuation(quick: bool = False) -> str:
-    """Parameter continuation across n values."""
-    pc_mod = _load_module("pc", "parameter_continuation.py")
-
-    lines = ["=" * 70,
-             "Experiment 8: Parameter Continuation (Solution Family vs n)",
-             "=" * 70, ""]
-
-    delta = 0.5 if quick else 0.25
-    curve = pc_mod.trace_parameter_curve(n_start=0.0, n_end=4.5, delta_n=delta)
-
-    lines.append(f"{'n':>6s}  {'xi_1':>12s}")
-    lines.append("-" * 22)
-    for n_val, xi1 in zip(curve["n_values"], curve["xi_1_values"]):
-        lines.append(f"{n_val:6.2f}  {xi1:12.6f}")
 
     return "\n".join(lines)
 
@@ -341,7 +321,6 @@ def main():
         ("Method Comparison", experiment_5_method_comparison),
         ("Isothermal Sphere", experiment_6_isothermal),
         ("TOV Equations", experiment_7_tov),
-        ("Parameter Continuation", experiment_8_continuation),
     ]
 
     all_output = []
