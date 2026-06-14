@@ -25,6 +25,7 @@ class ImplicitRKSolution:
     first_zero: Optional[float]
     num_steps: int
     num_newton_iters: int
+    newton_per_step: Optional[list] = None
 
 
 # 3-stage Radau IIA Butcher tableau (order 5, L-stable)
@@ -156,6 +157,7 @@ def solve_lane_emden_radau(
     first_zero = None
     step_count = 0
     total_newton = 0
+    newton_per_step = []
 
     while xi < xi_max and step_count < max_steps:
         step = min(h, xi_max - xi)
@@ -172,6 +174,7 @@ def solve_lane_emden_radau(
         new_xi = xi + step
         step_count += 1
         total_newton += n_iters
+        newton_per_step.append(n_iters)
 
         if stop_at_zero and state[0] > 0 and new_state[0] <= 0:
             w = abs(state[0]) / (abs(state[0]) + abs(new_state[0]))
@@ -192,60 +195,217 @@ def solve_lane_emden_radau(
         n=n, xi=np.array(xi_list), theta=np.array(theta_list),
         theta_prime=np.array(tp_list), first_zero=first_zero,
         num_steps=step_count, num_newton_iters=total_newton,
+        newton_per_step=newton_per_step,
     )
 
 
 if __name__ == "__main__":
     import math
     import time
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from pathlib import Path
+    import importlib.util, sys
+
+    # Import RK4 for comparison
+    rk_path = Path(__file__).resolve().parent / "rk4.py"
+    spec = importlib.util.spec_from_file_location("rk_temp2", rk_path)
+    rk_mod = importlib.util.module_from_spec(spec)
+    sys.modules["rk_temp2"] = rk_mod
+    spec.loader.exec_module(rk_mod)
+
+    OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output_initial"
+    OUTPUT_DIR.mkdir(exist_ok=True)
 
     print("=" * 70)
-    print("Implicit RK (Radau IIA) vs Explicit RK4")
+    print("Implicit RK (Radau IIA) vs Explicit RK4 — Experimental Study")
     print("=" * 70)
 
-    # Focus on n close to 5 where stiffness matters
-    for n_val in (0.0, 3.0, 4.5):
-        print(f"\n--- n = {n_val:g} ---")
+    # --- Collect data for all (n, h, method) combinations ---
+    h_values = [5e-2, 2e-2, 1e-2, 5e-3, 2e-3]
+    n_values = [0.0, 3.0, 4.5]
+    results = {}  # results[(n, h, method)] = dict with keys
 
+    for n_val in n_values:
         if abs(n_val) < 1e-14:
             xi_max_val = math.sqrt(6.0)
+            xi_ref = math.sqrt(6.0)
         elif abs(n_val - 1.0) < 1e-14:
             xi_max_val = math.pi
+            xi_ref = math.pi
         else:
             ref = load_reference_data()
             xi_max_val = ref.get_first_zero(n_val) or 10.0
+            xi_ref = xi_max_val
 
-        # Implicit Radau
-        print("  Radau IIA (implicit, L-stable):")
-        for h_test in (5e-2, 2e-2, 1e-2):
+        print(f"\n--- n = {n_val:g} (ref xi_1 = {xi_ref:.8f}) ---")
+
+        # Radau IIA
+        print("  Radau IIA:")
+        for h_test in h_values:
             try:
                 t0 = time.perf_counter()
                 sol = solve_lane_emden_radau(n=n_val, epsilon=1e-4, h=h_test,
                                              xi_max=xi_max_val)
                 elapsed = time.perf_counter() - t0
+                xi1_err = abs(sol.first_zero - xi_ref) if sol.first_zero else float('inf')
+                results[(n_val, h_test, 'radau')] = {
+                    'steps': sol.num_steps, 'newton': sol.num_newton_iters,
+                    'xi_1': sol.first_zero, 'error': xi1_err, 'time': elapsed,
+                    'xi': sol.xi, 'theta': sol.theta,
+                    'newton_per_step': sol.newton_per_step,
+                }
+                xi1_str = f"{sol.first_zero:.8f}" if sol.first_zero else "None"
                 print(f"    h={h_test:.0e}: {sol.num_steps} steps, "
-                      f"{sol.num_newton_iters} Newton iters, "
-                      f"{elapsed:.4f}s, xi_1={sol.first_zero}")
+                      f"{sol.num_newton_iters} Newton, "
+                      f"{elapsed:.4f}s, xi_1={xi1_str}, err={xi1_err:.2e}")
             except Exception as e:
                 print(f"    h={h_test:.0e}: FAILED - {e}")
+                results[(n_val, h_test, 'radau')] = None
 
-        # Compare with explicit RK4
-        print("  RK4 (explicit):")
-        from pathlib import Path
-        import importlib.util, sys
-        rk_path = Path(__file__).resolve().parent / "rk4.py"
-        spec = importlib.util.spec_from_file_location("rk_temp2", rk_path)
-        rk_mod = importlib.util.module_from_spec(spec)
-        sys.modules["rk_temp2"] = rk_mod
-        spec.loader.exec_module(rk_mod)
-
-        for h_test in (5e-2, 2e-2, 1e-2):
+        # RK4
+        print("  RK4:")
+        for h_test in h_values:
             try:
                 t0 = time.perf_counter()
                 sol = rk_mod.solve_lane_emden_rk4(n=n_val, epsilon=1e-4, h=h_test,
                                                    xi_max=xi_max_val)
                 elapsed = time.perf_counter() - t0
+                xi1_err = abs(sol.first_zero - xi_ref) if sol.first_zero else float('inf')
+                results[(n_val, h_test, 'rk4')] = {
+                    'steps': len(sol.xi) - 1, 'xi_1': sol.first_zero,
+                    'error': xi1_err, 'time': elapsed,
+                    'xi': sol.xi, 'theta': sol.theta,
+                }
+                xi1_str = f"{sol.first_zero:.8f}" if sol.first_zero else "None"
                 print(f"    h={h_test:.0e}: {len(sol.xi) - 1} steps, "
-                      f"{elapsed:.4f}s, xi_1={sol.first_zero}")
+                      f"{elapsed:.4f}s, xi_1={xi1_str}, err={xi1_err:.2e}")
             except Exception as e:
                 print(f"    h={h_test:.0e}: FAILED - {e}")
+                results[(n_val, h_test, 'rk4')] = None
+
+    # ============================================================
+    # Generate 2×2 overview figure
+    # ============================================================
+    fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+
+    # --- Panel (0,0): theta(xi) for n=4.5, Radau vs RK4 at multiple h ---
+    ax = axes[0, 0]
+    n_plot = 4.5
+    h_plot_list = [5e-2, 2e-2, 1e-2]
+    colors = {5e-2: '#2196F3', 2e-2: '#4CAF50', 1e-2: '#FF9800'}
+    for h_test in h_plot_list:
+        # Radau
+        r = results.get((n_plot, h_test, 'radau'))
+        if r is not None:
+            ax.plot(r['xi'], r['theta'], color=colors[h_test], linewidth=1.5,
+                    linestyle='-', label=f'Radau h={h_test:.0e}')
+        # RK4
+        r_rk = results.get((n_plot, h_test, 'rk4'))
+        if r_rk is not None:
+            ax.plot(r_rk['xi'], r_rk['theta'], color=colors[h_test], linewidth=1.0,
+                    linestyle='--', alpha=0.7, label=f'RK4 h={h_test:.0e}')
+    ax.set_xlabel(r'$\xi$', fontsize=11)
+    ax.set_ylabel(r'$\theta(\xi)$', fontsize=11)
+    ax.set_title(f'Density Profiles: Radau IIA vs RK4 (n={n_plot})', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(left=0)
+    ax.annotate('Solid: Radau IIA (L-stable)\nDashed: RK4 (explicit)\n'
+                'n=4.5 near-critical → stiff regime',
+                xy=(0.97, 0.97), xycoords='axes fraction', fontsize=8,
+                ha='right', va='top',
+                bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+
+    # --- Panel (0,1): Error in xi_1 vs step size h (log-log) ---
+    ax = axes[0, 1]
+    markers = {0.0: 'o', 3.0: 's', 4.5: '^'}
+    for n_val in n_values:
+        for method, m_label, m_style in [('radau', 'Radau', '-'), ('rk4', 'RK4', '--')]:
+            h_err = []
+            err_vals = []
+            for h_test in h_values:
+                r = results.get((n_val, h_test, method))
+                if r is not None and r['error'] < 1e10 and r['error'] > 0:
+                    h_err.append(h_test)
+                    err_vals.append(r['error'])
+            if h_err:
+                ax.loglog(h_err, err_vals, linestyle=m_style, marker=markers[n_val],
+                          markersize=6, linewidth=1.2,
+                          label=f'{m_label}, n={n_val:g}')
+    # Reference O(h^4) and O(h^2) lines
+    h_ref = np.array([1e-3, 1e-1])
+    ax.loglog(h_ref, 1e-4 * (h_ref / 1e-2) ** 4, 'k:', linewidth=1, alpha=0.5, label=r'$O(h^4)$')
+    ax.loglog(h_ref, 1e-2 * (h_ref / 1e-2) ** 2, 'k-.', linewidth=1, alpha=0.5, label=r'$O(h^2)$')
+    ax.set_xlabel('Step size h', fontsize=11)
+    ax.set_ylabel(r'Error in $\xi_1$', fontsize=11)
+    ax.set_title(r'Error Convergence: Radau IIA vs RK4', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3, which='both')
+
+    # --- Panel (1,0): Newton iterations per step vs xi for n=4.5, h=2e-2 ---
+    ax = axes[1, 0]
+    r_n = results.get((4.5, 2e-2, 'radau'))
+    if r_n is not None and r_n['newton_per_step'] is not None:
+        nps = r_n['newton_per_step']
+        xi_vals = r_n['xi'][1:len(nps)+1]  # xi after each step
+        # Bar chart of iterations per step
+        ax.bar(range(len(nps)), nps, width=0.8, color='steelblue', alpha=0.7, edgecolor='navy', linewidth=0.3)
+        ax.set_xlabel('Step index', fontsize=11)
+        ax.set_ylabel('Newton iterations', fontsize=11)
+        ax.set_title(f'Newton Iterations per Step (n=4.5, h=2e-2)', fontsize=12, fontweight='bold')
+        avg_iters = np.mean(nps)
+        ax.axhline(y=avg_iters, color='red', linestyle='--', linewidth=1,
+                   label=f'Average: {avg_iters:.1f} iters/step')
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_ylim(bottom=0)
+        ax.annotate(f'Total steps: {len(nps)}\nTotal Newton iters: {sum(nps)}\n'
+                    f'Max iters/step: {max(nps)}',
+                    xy=(0.97, 0.97), xycoords='axes fraction', fontsize=8,
+                    ha='right', va='top',
+                    bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    else:
+        ax.text(0.5, 0.5, 'No per-step Newton data available', transform=ax.transAxes,
+                ha='center', va='center', fontsize=12)
+        ax.set_title('Newton Iterations per Step', fontsize=12, fontweight='bold')
+
+    # --- Panel (1,1): Summary table ---
+    ax = axes[1, 1]
+    ax.axis('off')
+    table_data = []
+    for n_val in n_values:
+        for h_test in [5e-2, 2e-2, 1e-2]:
+            row = [f'n={n_val:g}, h={h_test:.0e}']
+            for method, m_label in [('radau', 'Radau'), ('rk4', 'RK4')]:
+                r = results.get((n_val, h_test, method))
+                if r is not None:
+                    row.append(f"{r['steps']}")
+                    row.append(f"{r['xi_1']:.6f}" if r['xi_1'] else 'N/A')
+                    row.append(f"{r['error']:.2e}")
+                    row.append(f"{r['time']:.4f}s")
+                else:
+                    row.extend(['—', '—', '—', '—'])
+            table_data.append(row)
+
+    col_labels = ['Case', 'Steps\n(Radau)', 'ξ₁ (Radau)', 'Err (Radau)', 'Time',
+                       'Steps\n(RK4)', 'ξ₁ (RK4)', 'Err (RK4)', 'Time']
+    # Reshape data: 2 rows for Radau, 2 rows for RK4 per case
+    flat_data = []
+    for row in table_data:
+        flat_data.append([row[0]] + row[1:5] + row[5:9])
+
+    table = ax.table(cellText=flat_data, colLabels=col_labels,
+                     cellLoc='center', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(7)
+    table.scale(0.95, 1.5)
+    ax.set_title('Key Metrics: Radau IIA vs RK4 Comparison', fontsize=12, fontweight='bold',
+                 pad=20)
+
+    fig.suptitle('Implicit Radau IIA Method: Experimental Validation', fontsize=15, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
+    plt.savefig(OUTPUT_DIR / 'radau_overview.png', dpi=200)
+    plt.close()
+    print(f"\nPlot saved to {OUTPUT_DIR / 'radau_overview.png'}")
