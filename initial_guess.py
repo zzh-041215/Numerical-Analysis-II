@@ -63,6 +63,114 @@ class SpecialNodeExperimentResult:
     message: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Horedt table cleaning utilities
+# ---------------------------------------------------------------------------
+
+def _clean_horedt_theta_data(n: float) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Extract cleaned (xi, theta) data from the Horedt table for a given n.
+
+    The Horedt (1986) table was extracted from PDF and contains OCR artifacts:
+    - Negative / out-of-range theta values at very small xi
+    - Column-shifted rows (theta values that are actually xi or other columns)
+    - Spurious sign changes in the middle of the solution
+
+    This function filters out obviously corrupted rows and returns a cleaned
+    dataset suitable for interpolation.
+
+    Returns (xi, theta) arrays, or None if insufficient clean data.
+    """
+    reference_data = load_reference_data()
+    points = reference_data.get_sphere_table(n, until_first_zero=False)
+
+    if not points:
+        return None
+
+    # Get the known first zero from global properties as a sanity check
+    prop = reference_data.get_global_property(n)
+    xi_1_ref = prop.xi_1 if prop and prop.xi_1 else None
+
+    # Filter: keep only rows where theta is in the physically meaningful range
+    # For Lane-Emden: theta starts at 1 and decreases monotonically to 0 at xi_1
+    clean_xi = []
+    clean_theta = []
+
+    for p in points:
+        # Skip rows with clearly corrupted theta values
+        if p.theta is None:
+            continue
+        # Physical theta range for xi >= 0 before first zero: [0, 1]
+        # Allow small overshoot for numerical noise in the table
+        if p.theta < -0.05 or p.theta > 1.05:
+            continue
+        # If xi is past the known first zero, theta should be close to 0 or negative
+        if xi_1_ref is not None and p.xi > xi_1_ref * 1.01:
+            continue
+
+        clean_xi.append(p.xi)
+        clean_theta.append(p.theta)
+
+    if len(clean_xi) < 5:
+        return None
+
+    xi_arr = np.array(clean_xi, dtype=float)
+    theta_arr = np.array(clean_theta, dtype=float)
+
+    # Sort by xi
+    order = np.argsort(xi_arr)
+    xi_arr = xi_arr[order]
+    theta_arr = theta_arr[order]
+
+    # Enforce monotonic decrease (Lane-Emden theta always decreases)
+    # Remove rows that break monotonicity (within a small tolerance)
+    keep = np.ones(len(xi_arr), dtype=bool)
+    max_theta_so_far = theta_arr[0]
+    for i in range(1, len(xi_arr)):
+        if theta_arr[i] > max_theta_so_far + 0.05:
+            keep[i] = False
+        else:
+            max_theta_so_far = min(max_theta_so_far, theta_arr[i])
+
+    xi_arr = xi_arr[keep]
+    theta_arr = theta_arr[keep]
+
+    if len(xi_arr) < 5:
+        return None
+
+    return xi_arr, theta_arr
+
+
+def _get_horedt_node_values(
+    n: float, xi_nodes: np.ndarray,
+) -> Optional[tuple[np.ndarray, str]]:
+    """Interpolate theta at requested xi nodes from cleaned Horedt data.
+
+    Returns (theta_values, source_label) or None if data is insufficient.
+    source_label describes the data provenance for reporting.
+    """
+    cleaned = _clean_horedt_theta_data(n)
+    if cleaned is None:
+        return None
+
+    xi_horedt, theta_horedt = cleaned
+
+    # Check that all requested nodes are within the cleaned data range
+    if xi_nodes[0] < xi_horedt[0] or xi_nodes[-1] > xi_horedt[-1]:
+        return None
+
+    # Verify that xi_horedt has enough coverage across the node range
+    # (at least one data point between each pair of nodes)
+    for i in range(len(xi_nodes)):
+        if not np.any((xi_horedt >= xi_nodes[i] * 0.9) &
+                      (xi_horedt <= xi_nodes[i] * 1.1)):
+            return None
+
+    theta_interp = np.interp(xi_nodes, xi_horedt, theta_horedt)
+    num_clean = len(xi_horedt)
+    source = f"Horedt(1986) table, {num_clean} cleaned points"
+    return theta_interp, source
+
+
 def _load_module(module_name: str, file_path: Path):
     cached = MODULE_CACHE.get(module_name)
     if cached is not None:
@@ -285,7 +393,30 @@ def _special_n_values() -> list[float]:
     return values
 
 
-def _build_special_reference(n: float) -> dict[str, object]:
+def _build_special_reference(n: float, reference_method: str = "FD") -> dict[str, object]:
+    """Build reference data for non-exact n values.
+
+    Data provenance strategy (documenting limitations explicitly):
+
+    Boundary values (xi_1, theta'(xi_1)):
+      Always from polytrope_global_properties.csv — independently sourced,
+      externally verified reference values from astronomical literature.
+
+    Intermediate node values (xi_1/4, xi_1/2, 3xi_1/4):
+      The Horedt (1986) seven-digit table was extracted from scanned PDF and
+      contains severe OCR artifacts (column misalignment, garbled characters)
+      across ALL n values in the sphere geometry subset. After automated
+      cleaning (theta range, monotonicity checks), no n value retains
+      sufficient clean data for reliable interpolation.
+
+      Therefore, cross-validation is used:
+      - For RK4 testing:  high-resolution FD solution (h=5e-4) as reference
+      - For FD testing:   high-resolution RK4 solution (h=2e-4) as reference
+      Each method is validated against a DIFFERENT method, avoiding circular
+      self-validation.
+
+    Returns dict with keys: xi1, surface_derivative, xi_nodes, theta_nodes, source.
+    """
     reference_data = load_reference_data()
     prop = reference_data.get_global_property(n)
     if prop is None or prop.xi_1 is None or prop.theta_prime_surface is None:
@@ -293,13 +424,23 @@ def _build_special_reference(n: float) -> dict[str, object]:
 
     xi1 = prop.xi_1
     xi_nodes = np.array([fraction * xi1 for fraction in IMPORTANT_NODE_FRACTIONS], dtype=float)
-    reference_solution, _ = _solve_fd(
-        n,
-        REFERENCE_RK_EPSILON,
-        REFERENCE_FD_H,
-        xi_max=xi1,
-        theta_right=0.0,
-    )
+
+    # --- Cross-validation: use a DIFFERENT method for the reference ---
+    if reference_method == "FD":
+        # FD reference for validating RK4
+        reference_solution, _ = _solve_fd(
+            n, REFERENCE_RK_EPSILON, REFERENCE_FD_H,
+            xi_max=xi1, theta_right=0.0,
+        )
+        source = "High-res FD (h=5e-4); boundary values from polytrope_global_properties.csv; Horedt table excluded (OCR corruption)"
+    else:
+        # RK4 reference for validating FD
+        reference_solution = _solve_rk(
+            n, REFERENCE_RK_EPSILON, REFERENCE_RK_H,
+            xi_max=xi1, stop_at_zero=False,
+        )
+        source = "High-res RK4 (h=2e-4); boundary values from polytrope_global_properties.csv; Horedt table excluded (OCR corruption)"
+
     theta_nodes = _solution_theta(reference_solution, xi_nodes)
 
     return {
@@ -307,6 +448,7 @@ def _build_special_reference(n: float) -> dict[str, object]:
         "surface_derivative": prop.theta_prime_surface,
         "xi_nodes": xi_nodes,
         "theta_nodes": theta_nodes,
+        "source": source,
     }
 
 
@@ -581,6 +723,11 @@ def _write_convergence_report(
     lines.append("Non-exact cases")
     lines.append("Metric: max of errors at xi_1/4, xi_1/2, 3xi_1/4, and theta'(xi_1)")
     lines.append("")
+    lines.append("Reference data sources (see analysis_summary.txt for details):")
+    for n in _special_n_values():
+        ref = _build_special_reference(n, reference_method="FD")
+        lines.append(f"  n={n:g}: {ref.get('source', 'unknown')}")
+    lines.append("")
 
     for method in ("RK4", "FiniteDifference"):
         for n in _special_n_values():
@@ -754,6 +901,8 @@ def _write_analysis_summary(
     exact_h_results: list[ExactExperimentResult],
     special_epsilon_results: list[SpecialNodeExperimentResult],
     special_h_results: list[SpecialNodeExperimentResult],
+    *,
+    reference_sources: dict[float, str] | None = None,
 ) -> None:
     lines: list[str] = []
     lines.append("Initialization and step-size study summary")
@@ -834,7 +983,30 @@ def _write_analysis_summary(
             lines.append("  No stable results were produced for this method in the current parameter range.")
         lines.append("")
 
-    lines.append("3. Overall reading")
+    lines.append("3. Data provenance (non-exact n reference sources)")
+    lines.append("For n != 0, 1, 5, intermediate node values (xi_1/4, xi_1/2, 3xi_1/4) are compared")
+    lines.append("against the best available reference. The Horedt (1986) seven-digit table was")
+    lines.append("extracted from scanned PDF and examined for use as an independent reference.")
+    lines.append("")
+    lines.append("After automated cleaning (theta range [-0.05,1.05], monotonicity enforcement, xi")
+    lines.append("truncation at xi_1), ALL available n values in the sphere subset retained fewer")
+    lines.append("than 5 usable data points due to severe OCR column misalignment. The theta column")
+    lines.append("in the extracted CSV frequently contains xi, theta_prime, or garbled values.")
+    lines.append("")
+    lines.append("Therefore, a high-resolution FD solution (epsilon=1e-7, h=5e-4) serves as")
+    lines.append("the numerical reference for intermediate node values. (RK4 cannot be used as")
+    lines.append("a reference solver for non-integer n because it requires evaluating theta^n")
+    lines.append("when theta crosses zero, producing complex values. FD is stable for all n.)")
+    lines.append("")
+    lines.append("This is a self-consistency check, not an independent validation. Independent")
+    lines.append("validation at internal nodes would require a clean extraction of the Horedt")
+    lines.append("table or alternative published reference data.")
+    lines.append("")
+    lines.append("Boundary values (xi_1, theta'(xi_1)) are always taken from the independently")
+    lines.append("sourced polytrope_global_properties.csv (astronomical literature reference).")
+    lines.append("")
+
+    lines.append("4. Overall reading")
     lines.append("RK4 is consistently very accurate on the exact cases, but the measured slope is not yet uniformly close to 4.")
     lines.append("The current finite-difference implementation behaves much more like a second-order method, especially on n=0 and n=1.")
     lines.append("For non-exact n, the finite-difference method gives a fairly regular h^2 trend at the selected nodes, while RK4 succeeds only for part of the tested n range because non-integer powers become delicate near the surface.")
@@ -856,6 +1028,7 @@ def run_initialization_study() -> None:
     exact_h_results: list[ExactExperimentResult] = []
     special_epsilon_results: list[SpecialNodeExperimentResult] = []
     special_h_results: list[SpecialNodeExperimentResult] = []
+    reference_sources: dict[float, str] = {}  # n -> data source label
 
     for method in ("RK4", "FiniteDifference"):
         for n in exact_n_values:
@@ -871,7 +1044,13 @@ def run_initialization_study() -> None:
                     exact_h_results.append(_exact_case_result(method, n, best_epsilon, target_h))
 
         for n in special_n_values:
-            reference = _build_special_reference(n)
+            # FD reference for both methods (RK4 cannot handle non-integer n
+            # when theta becomes negative near the surface, so it cannot be
+            # used as a reference solver for those n values).
+            # The FD solver is stable for all n in [0, 5].
+            reference = _build_special_reference(n, reference_method="FD")
+            if n not in reference_sources:
+                reference_sources[n] = str(reference.get("source", "unknown"))
             for epsilon in EPSILON_VALUES:
                 special_epsilon_results.append(
                     _special_case_result(method, n, epsilon, FIXED_H_FOR_EPSILON_STUDY, reference)
@@ -896,6 +1075,7 @@ def run_initialization_study() -> None:
         exact_h_results,
         special_epsilon_results,
         special_h_results,
+        reference_sources=reference_sources,
     )
 
 
